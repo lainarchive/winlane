@@ -22,17 +22,52 @@ def write_ppm(path, width=64, height=48):
         output.write(header + pixels)
 
 
+def split_qemu_options(value):
+    parts = []
+    current = []
+    index = 0
+    while index < len(value):
+        if value[index] != ",":
+            current.append(value[index])
+            index += 1
+            continue
+        if index + 1 < len(value) and value[index + 1] == ",":
+            current.append(",")
+            index += 2
+        else:
+            parts.append("".join(current))
+            current = []
+            index += 1
+    parts.append("".join(current))
+    return parts
+
+
+def qga_socket_path(args):
+    for index, arg in enumerate(args[:-1]):
+        if arg != "-chardev":
+            continue
+        parts = split_qemu_options(args[index + 1])
+        if len(parts) < 2 or parts[0] != "socket" or parts[1] != "id=qga0":
+            continue
+        for part in parts[2:]:
+            if part.startswith("path="):
+                return part[5:]
+    return None
+
+
 def main():
     args = sys.argv[1:]
     qmp_arg = argument_after(args, "-qmp")
     if not qmp_arg or not qmp_arg.startswith("unix:"):
         print("missing unix QMP socket argument", file=sys.stderr)
         return 2
-    socket_path = qmp_arg[5:].split(",", 1)[0]
+    socket_path = split_qemu_options(qmp_arg[5:])[0]
     pidfile = argument_after(args, "-pidfile")
     if pidfile:
         with open(pidfile, "w", encoding="utf-8") as output:
             output.write(str(os.getpid()))
+    with open(socket_path + ".argv", "w", encoding="utf-8") as output:
+        output.write(json.dumps(args) + "\n")
 
     try:
         os.unlink(socket_path)
@@ -42,6 +77,16 @@ def main():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
     server.listen(4)
+    qga_server = None
+    qga_path = qga_socket_path(args)
+    if qga_path:
+        try:
+            os.unlink(qga_path)
+        except FileNotFoundError:
+            pass
+        qga_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        qga_server.bind(qga_path)
+        qga_server.listen(4)
     log_path = socket_path + ".commands"
     stopping = threading.Event()
 
@@ -109,6 +154,17 @@ def main():
                     delayed_exit(0)
                 else:
                     reply(connection, identifier, {"error": {"class": "CommandNotFound", "desc": f"unsupported fake command {execute}"}})
+
+    def accept_qga():
+        while not stopping.is_set():
+            try:
+                client, _ = qga_server.accept()
+                client.close()
+            except OSError:
+                return
+
+    if qga_server:
+        threading.Thread(target=accept_qga, daemon=True).start()
 
     signal.signal(signal.SIGTERM, lambda _signum, _frame: delayed_exit(0))
     while not stopping.is_set():

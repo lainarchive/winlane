@@ -146,6 +146,166 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn base_image_and_guest_agent_create_overlay_and_qga_socket() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let image_root = tempfile::tempdir().expect("temporary image root");
+    let golden = image_root.path().join("golden.qcow2");
+    let golden_bytes = b"golden image fixture\n";
+    std::fs::write(&golden, golden_bytes).expect("write golden image");
+    let linked_golden = image_root.path().join("linked-golden.qcow2");
+    std::os::unix::fs::symlink(&golden, &linked_golden).expect("link golden image");
+    let canonical_golden = std::fs::canonicalize(&golden).expect("canonical golden image");
+    let canonical_golden_string = canonical_golden.to_string_lossy().into_owned();
+
+    let mut machine_spec = spec("runtimeqga");
+    machine_spec.base_image_path = Some(linked_golden.to_string_lossy().into_owned());
+    machine_spec.guest_agent = true;
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&machine_spec)
+        .await
+        .expect("create runtime machine");
+    let state_dir = PathBuf::from(&machine.state_dir);
+
+    let disk: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state_dir.join("disk.qcow2")).expect("read overlay metadata"),
+    )
+    .expect("parse overlay metadata");
+    assert_eq!(
+        disk["backing"].as_str(),
+        Some(canonical_golden_string.as_str())
+    );
+    assert_eq!(disk["backing_format"].as_str(), Some("qcow2"));
+
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state_dir.join("machine.json")).expect("read machine record"),
+    )
+    .expect("parse machine record");
+    let qga_socket = state_dir.join("qga.sock");
+    let qga_socket_string = qga_socket.to_string_lossy().into_owned();
+    assert_eq!(
+        backend
+            .guest_agent_socket_path(&machine)
+            .await
+            .expect("guest agent socket path"),
+        Some(qga_socket.clone())
+    );
+    assert_eq!(
+        record["qga_socket_path"].as_str(),
+        Some(qga_socket_string.as_str())
+    );
+    assert_eq!(
+        record["spec"]["base_image_path"].as_str(),
+        Some(canonical_golden_string.as_str())
+    );
+
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start runtime machine");
+    assert!(qga_socket.exists());
+    std::os::unix::net::UnixStream::connect(&qga_socket).expect("connect to fake QGA socket");
+
+    let argv: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(state_dir.join("qmp.sock.argv")).expect("read QEMU argv"),
+    )
+    .expect("parse QEMU argv");
+    let serial_index = argv
+        .iter()
+        .position(|arg| arg == "virtio-serial-pci")
+        .expect("virtio serial device");
+    let chardev_index = argv
+        .iter()
+        .position(|arg| arg.starts_with("socket,id=qga0,path="))
+        .expect("QGA chardev");
+    let port_index = argv
+        .iter()
+        .position(|arg| arg == "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0")
+        .expect("QGA virtserialport");
+    assert!(serial_index < chardev_index);
+    assert!(chardev_index < port_index);
+    assert!(argv[chardev_index].contains("server=on,wait=off"));
+    assert!(argv[chardev_index].contains(&qga_socket_string));
+
+    backend
+        .stop_machine(&machine)
+        .await
+        .expect("stop runtime machine");
+    backend
+        .destroy_machine(&machine)
+        .await
+        .expect("destroy runtime machine");
+    assert_eq!(
+        std::fs::read(&golden).expect("read golden image"),
+        golden_bytes
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guest_agent_socket_path_commas_are_escaped_for_qemu() {
+    let outer = tempfile::tempdir().expect("temporary outer root");
+    let root = outer.path().join("comma,root");
+    let mut backend = QemuBackend::new(&root)
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let mut machine_spec = spec("commaqga");
+    machine_spec.guest_agent = true;
+    let machine = backend
+        .create_machine(&machine_spec)
+        .await
+        .expect("create comma-path machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start comma-path machine");
+
+    let state_dir = PathBuf::from(&machine.state_dir);
+    let argv: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(state_dir.join("qmp.sock.argv")).expect("read QEMU argv"),
+    )
+    .expect("parse QEMU argv");
+    let qga_socket_string = state_dir.join("qga.sock").to_string_lossy().into_owned();
+    let escaped_qga_socket = qga_socket_string.replace(',', ",,");
+    let chardev = argv
+        .iter()
+        .find(|arg| arg.starts_with("socket,id=qga0,path="))
+        .expect("QGA chardev");
+    assert!(chardev.contains(&escaped_qga_socket));
+    assert!(!chardev.contains(&qga_socket_string));
+
+    backend
+        .stop_machine(&machine)
+        .await
+        .expect("stop comma-path machine");
+    backend
+        .destroy_machine(&machine)
+        .await
+        .expect("destroy comma-path machine");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_base_image_is_rejected_without_creating_state() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let mut machine_spec = spec("missingbase");
+    machine_spec.base_image_path = Some(
+        root.path()
+            .join("missing-golden.qcow2")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert!(backend.create_machine(&machine_spec).await.is_err());
+    assert!(!root.path().join("missingbase").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn qmp_correlates_commands_and_receives_async_events() {
     let root = tempfile::tempdir().expect("temporary qmp root");
     let socket = root.path().join("qmp.sock");
@@ -268,6 +428,101 @@ async fn real_qemu_machine_control_proof() {
         .destroy_machine(&machine)
         .await
         .expect("destroy real machine");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires qemu-system-x86_64, qemu-img, and writable /dev/kvm"]
+async fn real_qemu_base_image_guest_agent_control_proof() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let image_root = tempfile::tempdir().expect("temporary image root");
+    let golden = image_root.path().join("golden.qcow2");
+    let create_base = std::process::Command::new("qemu-img")
+        .arg("create")
+        .arg("-f")
+        .arg("qcow2")
+        .arg(&golden)
+        .arg("16G")
+        .output()
+        .expect("create golden image");
+    assert!(
+        create_base.status.success(),
+        "qemu-img create failed: {}",
+        String::from_utf8_lossy(&create_base.stderr)
+    );
+    let golden_before = std::fs::read(&golden).expect("read golden image before use");
+
+    let mut machine_spec = spec("realruntime");
+    machine_spec.base_image_path = Some(golden.to_string_lossy().into_owned());
+    machine_spec.guest_agent = true;
+    let mut backend = QemuBackend::new(root.path()).await.expect("backend");
+    let machine = backend
+        .create_machine(&machine_spec)
+        .await
+        .expect("create backed runtime machine");
+
+    let info = std::process::Command::new("qemu-img")
+        .arg("info")
+        .arg(PathBuf::from(&machine.state_dir).join("disk.qcow2"))
+        .output()
+        .expect("inspect runtime overlay");
+    assert!(
+        info.status.success(),
+        "qemu-img info failed: {}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let info_text = String::from_utf8_lossy(&info.stdout);
+    assert!(info_text.contains("backing file:"));
+    assert!(info_text.contains(&golden.to_string_lossy().into_owned()));
+    assert!(info_text.contains("backing file format: qcow2"));
+
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start backed runtime machine");
+    assert_eq!(
+        backend.status_machine(&machine).await.expect("status"),
+        MachineState::Running
+    );
+    let qga_socket = PathBuf::from(&machine.state_dir).join("qga.sock");
+    for _ in 0..100 {
+        if qga_socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(qga_socket.exists());
+    let checkpoint = backend
+        .checkpoint_machine(&machine, "runtimeqga")
+        .await
+        .expect("checkpoint backed runtime machine");
+    backend
+        .stop_machine(&machine)
+        .await
+        .expect("stop backed runtime machine");
+    let restored = backend
+        .restore_checkpoint(&checkpoint)
+        .await
+        .expect("restore backed runtime checkpoint");
+    backend
+        .start_machine(&restored)
+        .await
+        .expect("restart backed runtime machine");
+    assert_eq!(
+        backend.status_machine(&restored).await.expect("status"),
+        MachineState::Running
+    );
+    backend
+        .stop_machine(&restored)
+        .await
+        .expect("stop restored runtime machine");
+    backend
+        .destroy_machine(&machine)
+        .await
+        .expect("destroy backed runtime machine");
+    assert_eq!(
+        std::fs::read(&golden).expect("read golden image after use"),
+        golden_before
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
