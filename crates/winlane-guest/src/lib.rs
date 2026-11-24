@@ -1,5 +1,7 @@
 //! In-guest helper protocol, validation, and framed message encoding.
 
+pub mod qga;
+
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use thiserror::Error;
