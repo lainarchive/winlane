@@ -26,6 +26,7 @@ const FRAME_DIR: &str = "frames";
 const CHECKPOINT_DIR: &str = "checkpoints";
 const DISK_FILE: &str = "disk.qcow2";
 const QMP_SOCKET_FILE: &str = "qmp.sock";
+const QGA_SOCKET_FILE: &str = "qga.sock";
 const TPM_SOCKET_FILE: &str = "swtpm.sock";
 const TPM_DIR: &str = "tpm";
 const OVMF_VARS_FILE: &str = "ovmf-vars.fd";
@@ -43,6 +44,8 @@ struct MachineRecord {
     spec: MachineSpec,
     disk_path: PathBuf,
     qmp_socket_path: PathBuf,
+    #[serde(default)]
+    qga_socket_path: Option<PathBuf>,
     pid: Option<u32>,
     ovmf_vars_path: Option<PathBuf>,
     tpm_state_dir: Option<PathBuf>,
@@ -128,6 +131,19 @@ impl QemuBackend {
         &self.root_dir
     }
 
+    pub async fn guest_agent_socket_path(
+        &self,
+        machine: &MachineHandle,
+    ) -> CoreResult<Option<PathBuf>> {
+        let record = self.load_record(machine).await?;
+        if !record.spec.guest_agent {
+            return Ok(None);
+        }
+        Ok(Some(record.qga_socket_path.unwrap_or_else(|| {
+            PathBuf::from(&record.handle.state_dir).join(QGA_SOCKET_FILE)
+        })))
+    }
+
     pub async fn create_machine(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
         spec.validate()?;
         if spec.arch != CpuArch::X86_64 {
@@ -141,6 +157,24 @@ impl QemuBackend {
                 .await
                 .map_err(CoreError::io("read install iso", path))?;
         }
+        let mut stored_spec = spec.clone();
+        let backing_path = if let Some(base_image_path) = &spec.base_image_path {
+            let path = tokio::fs::canonicalize(PathBuf::from(base_image_path))
+                .await
+                .map_err(CoreError::io("canonicalize base image", base_image_path))?;
+            let metadata = tokio::fs::metadata(&path)
+                .await
+                .map_err(CoreError::io("read base image", &path))?;
+            if !metadata.is_file() {
+                return Err(CoreError::InvalidHandle(
+                    "base image path must be a regular file".to_string(),
+                ));
+            }
+            stored_spec.base_image_path = Some(path_to_string(&path)?);
+            Some(path)
+        } else {
+            None
+        };
 
         let state_dir = self.root_dir.join(&spec.name);
         if tokio::fs::try_exists(&state_dir)
@@ -154,10 +188,11 @@ impl QemuBackend {
         }
         let qmp_socket_path = state_dir.join(QMP_SOCKET_FILE);
         validate_socket_path(&qmp_socket_path)?;
+        let qga_socket_path = machine_qga_socket_path(&state_dir, spec.guest_agent)?;
 
         create_private_dir(&state_dir, "create machine state directory").await?;
         let disk_path = state_dir.join(DISK_FILE);
-        self.run_qemu_img_create(&disk_path, None, spec.disk_gb)
+        self.run_qemu_img_create(&disk_path, backing_path.as_deref(), spec.disk_gb)
             .await?;
 
         let tpm_state_dir = if spec.tpm {
@@ -177,16 +212,17 @@ impl QemuBackend {
         };
         let record = MachineRecord {
             handle: handle.clone(),
-            spec: spec.clone(),
+            spec: stored_spec.clone(),
             disk_path,
             qmp_socket_path,
+            qga_socket_path,
             pid: None,
             ovmf_vars_path: None,
             tpm_state_dir,
             pending_loadvm: None,
             checkpoints: Vec::new(),
         };
-        write_json(&state_dir.join(SPEC_FILE), spec).await?;
+        write_json(&state_dir.join(SPEC_FILE), &stored_spec).await?;
         self.write_record(&record).await?;
         Ok(handle)
     }
@@ -350,6 +386,7 @@ impl QemuBackend {
             )));
         }
         validate_socket_path(&state_dir.join(QMP_SOCKET_FILE))?;
+        let qga_socket_path = machine_qga_socket_path(&state_dir, spec.guest_agent)?;
         create_private_dir(&state_dir, "create clone state directory").await?;
 
         let disk_path = state_dir.join(DISK_FILE);
@@ -376,6 +413,7 @@ impl QemuBackend {
             spec: spec.clone(),
             disk_path,
             qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+            qga_socket_path,
             pid: None,
             ovmf_vars_path: None,
             tpm_state_dir,
@@ -827,6 +865,36 @@ impl QemuBackend {
                 "tpm-tis,tpmdev=tpm0".to_string(),
             ]);
         }
+        if record.spec.guest_agent {
+            let qga_socket = record
+                .qga_socket_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&record.handle.state_dir).join(QGA_SOCKET_FILE));
+            validate_socket_path(&qga_socket)?;
+            if tokio::fs::try_exists(&qga_socket)
+                .await
+                .map_err(CoreError::io("check guest agent socket", &qga_socket))?
+            {
+                tokio::fs::remove_file(&qga_socket)
+                    .await
+                    .map_err(CoreError::io(
+                        "remove stale guest agent socket",
+                        &qga_socket,
+                    ))?;
+            }
+            record.qga_socket_path = Some(qga_socket.clone());
+            args.extend([
+                "-device".to_string(),
+                "virtio-serial-pci".to_string(),
+                "-chardev".to_string(),
+                format!(
+                    "socket,id=qga0,path={},server=on,wait=off",
+                    qemu_option_escape(&path_to_string(&qga_socket)?)
+                ),
+                "-device".to_string(),
+                "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0".to_string(),
+            ]);
+        }
         if let Some(snapshot) = &record.pending_loadvm {
             args.extend(["-loadvm".to_string(), snapshot.clone()]);
         }
@@ -1176,11 +1244,20 @@ fn qemu_option_escape(value: &str) -> String {
     value.replace(',', ",,")
 }
 
+fn machine_qga_socket_path(state_dir: &Path, enabled: bool) -> CoreResult<Option<PathBuf>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let path = state_dir.join(QGA_SOCKET_FILE);
+    validate_socket_path(&path)?;
+    Ok(Some(path))
+}
+
 fn validate_socket_path(path: &Path) -> CoreResult<()> {
     let bytes = path.as_os_str().as_encoded_bytes().len();
     if bytes >= MAX_SOCKET_PATH_BYTES {
         return Err(CoreError::InvalidHandle(format!(
-            "QMP socket path is {bytes} bytes; Unix sockets must stay below {MAX_SOCKET_PATH_BYTES}"
+            "socket path is {bytes} bytes; Unix sockets must stay below {MAX_SOCKET_PATH_BYTES}"
         )));
     }
     Ok(())
@@ -1524,6 +1601,20 @@ mod tests {
             },
         );
         assert_eq!(scaled, (32767, 32767));
+    }
+
+    #[test]
+    fn escapes_commas_for_qemu_socket_options() {
+        assert_eq!(
+            qemu_option_escape("/tmp/machine,a/qga.sock"),
+            "/tmp/machine,,a/qga.sock"
+        );
+    }
+
+    #[test]
+    fn rejects_overlong_socket_paths() {
+        let path = PathBuf::from("/").join("a".repeat(MAX_SOCKET_PATH_BYTES));
+        assert!(validate_socket_path(&path).is_err());
     }
 
     #[test]

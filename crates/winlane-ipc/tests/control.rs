@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::json;
-use winlane_contracts::{BootMode, CpuArch, MachineSpec, NetworkMode};
+use winlane_contracts::{BootMode, CpuArch, MachineHandle, MachineSpec, NetworkMode};
 use winlane_core::QemuBackend;
 use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 
@@ -32,14 +32,16 @@ fn spec(name: &str) -> MachineSpec {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unix_control_serializes_concurrent_clients() {
     let root = tempfile::tempdir().expect("temporary machine root");
-    let mut backend = QemuBackend::new(root.path())
+    let image_root = tempfile::tempdir().expect("temporary image root");
+    let golden = image_root.path().join("golden.qcow2");
+    std::fs::write(&golden, b"golden image fixture\n").expect("write golden image");
+    let mut machine_spec = spec("ipctest");
+    machine_spec.base_image_path = Some(golden.to_string_lossy().into_owned());
+    machine_spec.guest_agent = true;
+    let backend = QemuBackend::new(root.path())
         .await
         .expect("backend")
         .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
-    let machine = backend
-        .create_machine(&spec("ipctest"))
-        .await
-        .expect("create machine");
 
     let socket_path = root.path().join("control.sock");
     let server_socket = socket_path.clone();
@@ -52,6 +54,13 @@ async fn unix_control_serializes_concurrent_clients() {
     }
 
     let client = UnixControlClient::new(&socket_path);
+    let machine: MachineHandle = serde_json::from_value(
+        client
+            .invoke(&ControlRequest::Create { spec: machine_spec })
+            .await
+            .expect("create over ipc"),
+    )
+    .expect("decode created machine");
     client
         .invoke(&ControlRequest::Start {
             machine: machine.clone(),
@@ -81,6 +90,7 @@ async fn unix_control_serializes_concurrent_clients() {
         .await
         .expect("frame over ipc");
     assert_eq!(frame["width"], 64);
+    assert!(PathBuf::from(&machine.state_dir).join("qga.sock").exists());
 
     client
         .invoke(&ControlRequest::Stop {
