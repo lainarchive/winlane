@@ -19,6 +19,19 @@ pub enum ViewError {
     InvalidGeometry,
     #[error("{protocol} was detected but its renderer is not implemented")]
     UnsupportedProtocol { protocol: &'static str },
+    #[error("invalid frame artifact: {0}")]
+    InvalidFrameArtifact(String),
+    #[error(
+        "frame artifact dimensions {actual_width}x{actual_height} do not match metadata {expected_width}x{expected_height}"
+    )]
+    FrameArtifactDimensionMismatch {
+        expected_width: u32,
+        expected_height: u32,
+        actual_width: u32,
+        actual_height: u32,
+    },
+    #[error("frame artifact sha256 does not match metadata")]
+    FrameArtifactHashMismatch,
     #[error("terminal output failed")]
     Output(#[from] io::Error),
 }
