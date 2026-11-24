@@ -21,4 +21,9 @@ repository = "https://github.com/lainarchive/winlane"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 winlane-contracts = { path = "crates/winlane-contracts" }
+winlane-core = { path = "crates/winlane-core" }
+winlane-ipc = { path = "crates/winlane-ipc" }
