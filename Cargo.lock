@@ -557,6 +557,7 @@ dependencies = [
  "tokio",
  "winlane-contracts",
  "winlane-core",
+ "winlane-evidence",
  "winlane-ipc",
 ]
 

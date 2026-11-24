@@ -1,19 +1,33 @@
 //! Newline-delimited JSON-RPC stdio transport for MCP clients.
 
 use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+use winlane_evidence::{EvidenceStore, sha256_hex};
 
 use crate::{McpControlPlane, McpError, McpResult, tool_definitions};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-pub async fn serve_stdio(control_socket: impl Into<std::path::PathBuf>) -> McpResult<()> {
+pub async fn serve_stdio(
+    control_socket: impl Into<std::path::PathBuf>,
+    evidence_root: Option<PathBuf>,
+) -> McpResult<()> {
     let control = McpControlPlane::new(control_socket);
-    serve_stdio_with_control(&control).await
+    let evidence = evidence_root
+        .map(|root| EvidenceStore::create(root).map(|store| Arc::new(Mutex::new(store))))
+        .transpose()?;
+    serve_stdio_with_control(&control, evidence).await
 }
 
-pub async fn serve_stdio_with_control(control: &McpControlPlane) -> McpResult<()> {
+pub async fn serve_stdio_with_control(
+    control: &McpControlPlane,
+    evidence: Option<Arc<Mutex<EvidenceStore>>>,
+) -> McpResult<()> {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let stdout = tokio::io::stdout();
@@ -43,7 +57,9 @@ pub async fn serve_stdio_with_control(control: &McpControlPlane) -> McpResult<()
                 continue;
             }
         };
-        if let Some(response) = handle_message(control, &value).await {
+        if let Some(response) =
+            handle_message_with_evidence(control, &value, evidence.clone()).await
+        {
             write_response(&mut output, response).await?;
         }
     }
@@ -55,6 +71,14 @@ pub async fn serve_stdio_with_control(control: &McpControlPlane) -> McpResult<()
 }
 
 pub async fn handle_message(control: &McpControlPlane, message: &Value) -> Option<Value> {
+    handle_message_with_evidence(control, message, None).await
+}
+
+pub async fn handle_message_with_evidence(
+    control: &McpControlPlane,
+    message: &Value,
+    evidence: Option<Arc<Mutex<EvidenceStore>>>,
+) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str);
     let Some(method) = method else {
@@ -80,7 +104,7 @@ pub async fn handle_message(control: &McpControlPlane, message: &Value) -> Optio
         "notifications/initialized" | "notifications/cancelled" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
-        "tools/call" => match tool_call(control, message.get("params")).await {
+        "tools/call" => match tool_call(control, message.get("params"), evidence).await {
             Ok(value) => Ok(value),
             Err(error) => Ok(tool_error_result(error.to_string())),
         },
@@ -97,7 +121,11 @@ pub async fn handle_message(control: &McpControlPlane, message: &Value) -> Optio
     })
 }
 
-async fn tool_call(control: &McpControlPlane, params: Option<&Value>) -> McpResult<Value> {
+async fn tool_call(
+    control: &McpControlPlane,
+    params: Option<&Value>,
+    evidence: Option<Arc<Mutex<EvidenceStore>>>,
+) -> McpResult<Value> {
     let params = params.ok_or_else(|| McpError::InvalidInput("missing params".to_string()))?;
     let name = params
         .get("name")
@@ -107,13 +135,67 @@ async fn tool_call(control: &McpControlPlane, params: Option<&Value>) -> McpResu
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let result = control.dispatch(name, &arguments).await?;
+    let outcome = control.dispatch(name, &arguments).await;
+    if let Some(store) = evidence {
+        record_tool_evidence(store, name, &arguments, &outcome).await?;
+    }
+    let result = outcome?;
     let text = serde_json::to_string_pretty(&result)?;
     Ok(json!({
         "content": [{"type":"text","text":text}],
         "structuredContent": {"result": result},
         "isError": false
     }))
+}
+
+async fn record_tool_evidence(
+    store: Arc<Mutex<EvidenceStore>>,
+    tool: &str,
+    arguments: &Value,
+    outcome: &McpResult<Value>,
+) -> McpResult<()> {
+    let payload = json!({
+        "tool": tool,
+        "input": sanitize_tool_input(tool, arguments),
+        "ok": outcome.is_ok(),
+        "result": outcome.as_ref().ok().cloned().unwrap_or(Value::Null),
+        "error": outcome.as_ref().err().map(ToString::to_string),
+    });
+    let machine_id = arguments
+        .pointer("/machine/id")
+        .or_else(|| arguments.pointer("/checkpoint/machine_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut store = store.lock().await;
+    store
+        .record(evidence_kind_for_tool(tool), machine_id, payload)
+        .map_err(McpError::from)?;
+    Ok(())
+}
+
+fn evidence_kind_for_tool(tool: &str) -> &'static str {
+    match tool {
+        "machine_start" => "machine_started",
+        "machine_stop" => "machine_stopped",
+        "screenshot" => "frame_captured",
+        "click" | "move" | "type_text" | "key" | "scroll" => "input_sent",
+        "checkpoint_create" => "checkpoint_created",
+        "checkpoint_restore" => "checkpoint_restored",
+        _ => "machine_status",
+    }
+}
+
+fn sanitize_tool_input(tool: &str, input: &Value) -> Value {
+    let mut sanitized = input.clone();
+    if tool == "type_text"
+        && let Some(text) = input.get("text").and_then(Value::as_str)
+    {
+        sanitized["text"] = json!({
+            "sha256": sha256_hex(text.as_bytes()),
+            "bytes": text.len(),
+        });
+    }
+    sanitized
 }
 
 fn tool_error_result(message: String) -> Value {
@@ -178,6 +260,26 @@ mod tests {
         .await
         .unwrap();
         assert!(response["result"]["tools"].as_array().unwrap().len() >= 11);
+    }
+
+    #[test]
+    fn redacts_typed_text_in_evidence_input() {
+        let input = json!({"machine":{"id":"m"},"text":"secret"});
+        let sanitized = sanitize_tool_input("type_text", &input);
+        assert!(sanitized["text"]["sha256"].is_string());
+        assert_eq!(sanitized["text"]["bytes"], 6);
+        assert!(sanitized["text"].get("sha256").is_some());
+        assert_ne!(sanitized["text"], "secret");
+    }
+
+    #[test]
+    fn maps_control_tools_to_evidence_kinds() {
+        assert_eq!(evidence_kind_for_tool("screenshot"), "frame_captured");
+        assert_eq!(evidence_kind_for_tool("click"), "input_sent");
+        assert_eq!(
+            evidence_kind_for_tool("checkpoint_restore"),
+            "checkpoint_restored"
+        );
     }
 
     #[tokio::test]

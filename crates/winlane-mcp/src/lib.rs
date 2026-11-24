@@ -21,6 +21,8 @@ pub enum McpError {
     Serialization(#[from] serde_json::Error),
     #[error("stdio transport error: {0}")]
     Io(String),
+    #[error(transparent)]
+    Evidence(#[from] winlane_evidence::EvidenceError),
 }
 
 /// Narrow MCP-facing seam. It exposes only the hardware-plane operations in
