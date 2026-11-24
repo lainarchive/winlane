@@ -1,5 +1,6 @@
 //! Terminal protocol detection, framebuffer rendering, resize planning, and safe input mapping.
 
+pub mod artifact;
 pub mod detect;
 pub mod error;
 pub mod frame;
@@ -8,6 +9,7 @@ pub mod harness;
 pub mod input;
 pub mod render;
 
+pub use artifact::{frame_from_artifact, frame_from_ppm};
 pub use detect::{
     DetectionSource, GraphicsProtocol, ProtocolSupport, TerminalCapabilities, TerminalEnvironment,
     detect_capabilities,

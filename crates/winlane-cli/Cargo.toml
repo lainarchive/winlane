@@ -6,6 +6,13 @@ repository.workspace = true
 
 [dependencies]
 winlane-contracts.workspace = true
+winlane-ipc.workspace = true
+winlane-view = { path = "../winlane-view" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+crossterm = "0.28"
+
+[dev-dependencies]
+tempfile = "3"
