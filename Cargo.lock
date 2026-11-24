@@ -528,6 +528,7 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "winlane-contracts",
 ]
