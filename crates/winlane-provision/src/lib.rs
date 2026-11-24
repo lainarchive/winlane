@@ -1,21 +1,26 @@
-//! Windows installation media, answer files, driver integration, golden-image sealing.
+//! Windows installation media, answer files, driver integration, golden-image provisioning.
 
-use thiserror::Error;
+mod answer;
+mod provision;
+mod qemu;
 
-#[derive(Debug, Error)]
-pub enum WinlaneProvisionError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
-}
+pub use provision::{
+    ProbeResult, ProvisionError, ProvisionOptions, ProvisionReport, ProvisionResult,
+    ProvisionStage, ReadinessReport, ShutdownReport, StageTiming, provision, write_human_log,
+};
+pub use qemu::{GuestExecStatus, QemuProtocolError};
 
 pub fn implementation_status() -> &'static str {
-    "scaffold-only"
+    "unattended-windows-provisioning"
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn reports_scaffold_status() {
-        assert_eq!(super::implementation_status(), "scaffold-only");
+    fn reports_implementation_status() {
+        assert_eq!(
+            super::implementation_status(),
+            "unattended-windows-provisioning"
+        );
     }
 }
