@@ -11,7 +11,7 @@ pub fn render_kitty(frame: &Frame, geometry: TerminalGeometry) -> ViewResult<Ren
     let plan = plan_frame(frame, geometry, OutputSurface::KittyPixels)?;
     let scaled = frame.scaled_nearest(plan.frame_width, plan.frame_height)?;
     let mut output = String::new();
-    output.push_str("\x1b_Ga=d,d=i,i=1,q=2\x1b\\");
+    output.push_str("\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
 
     let col = plan.offset_x / u32::from(geometry.cell_width_px) + 1;
     let row = plan.offset_y / u32::from(geometry.cell_height_px) + 1;
@@ -106,7 +106,7 @@ mod tests {
         let geometry = TerminalGeometry::new(10, 10, 8, 16).unwrap();
         let output = render_kitty(&frame, geometry).unwrap();
         let text = String::from_utf8(output.bytes).unwrap();
-        assert!(text.starts_with("\x1b_Ga=d,d=i,i=1,q=2\x1b\\"));
+        assert!(text.starts_with("\x1b_Ga=d,d=I,i=1,q=2\x1b\\"));
         assert!(text.contains("\x1b[3;1H"));
     }
 }
