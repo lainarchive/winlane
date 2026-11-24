@@ -708,7 +708,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "winlane-contracts",
+ "winlane-core",
  "winlane-ipc",
+ "winlane-mcp",
  "winlane-view",
 ]
 
