@@ -1,5 +1,7 @@
 //! MCP-facing machine-control tool mapping over the serialized control IPC boundary.
 
+pub mod server;
+
 use serde_json::{Value, json};
 use thiserror::Error;
 use winlane_contracts::{CheckpointRef, ControlEvent, MachineHandle, MouseButton, ScrollDirection};
@@ -17,6 +19,8 @@ pub enum McpError {
     UnknownTool(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("stdio transport error: {0}")]
+    Io(String),
 }
 
 /// Narrow MCP-facing seam. It exposes only the hardware-plane operations in
