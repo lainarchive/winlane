@@ -162,14 +162,20 @@ mod tests {
     struct MockQgaTransport {
         incoming: VecDeque<Vec<u8>>,
         exec_outputs: VecDeque<(i32, Vec<u8>, Vec<u8>)>,
+        file_read_bytes: Vec<u8>,
         written: WrittenRequests,
     }
 
     impl MockQgaTransport {
         fn new(exec_outputs: Vec<(i32, Vec<u8>, Vec<u8>)>, written: WrittenRequests) -> Self {
+            let file_read_bytes = exec_outputs
+                .first()
+                .map(|(_, stdout, _)| stdout.clone())
+                .unwrap_or_default();
             Self {
                 incoming: VecDeque::new(),
                 exec_outputs: exec_outputs.into(),
+                file_read_bytes,
                 written,
             }
         }
@@ -191,6 +197,11 @@ mod tests {
             let result = match execute {
                 "guest-file-open" => json!(1),
                 "guest-file-write" | "guest-file-flush" | "guest-file-close" => json!({}),
+                "guest-file-read" => json!({
+                    "buf-b64": STANDARD.encode(&self.file_read_bytes),
+                    "count": self.file_read_bytes.len(),
+                    "eof": true,
+                }),
                 "guest-exec" => json!({ "pid": 99 }),
                 "guest-exec-status" => {
                     let (exit_code, stdout, stderr) =
@@ -224,6 +235,25 @@ mod tests {
         let written = Rc::new(RefCell::new(Vec::new()));
         let transport = MockQgaTransport::new(exec_outputs, Rc::clone(&written));
         (BlockingUiaControl::new(QgaClient::new(transport)), written)
+    }
+
+    fn task_xml_payloads(requests: &[Value]) -> Vec<String> {
+        requests
+            .iter()
+            .filter(|request| request["execute"] == "guest-file-write")
+            .filter_map(|request| request["arguments"]["buf-b64"].as_str().map(str::to_owned))
+            .filter_map(|encoded| STANDARD.decode(encoded.as_bytes()).ok())
+            .filter(|bytes| bytes.starts_with(&[0xff, 0xfe]))
+            .filter_map(|bytes| {
+                let units: Vec<u16> = bytes[2..]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|chunk| u16::from_le_bytes(*chunk))
+                    .collect();
+                String::from_utf16(&units).ok()
+            })
+            .collect()
     }
 
     #[test]
@@ -278,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_tree_installs_helper_and_passes_bounds_to_powershell() {
+    fn ui_tree_installs_helper_and_passes_bounds_to_interactive_task() {
         let helper_stdout = br#"{"ok":true,"root":{"id":"0"},"nodeCount":1}"#.to_vec();
         let (mut control, written) = control(vec![(0, helper_stdout, Vec::new())]);
         let output = execute_operation(
@@ -294,22 +324,34 @@ mod tests {
         assert_eq!(output["root"]["id"], "0");
 
         let requests = written.borrow();
-        assert_eq!(requests.len(), 6);
         assert_eq!(requests[0]["execute"], "guest-file-open");
         assert_eq!(requests[0]["arguments"]["path"], UIA_HELPER_GUEST_PATH);
-        assert_eq!(requests[4]["execute"], "guest-exec");
-        assert_eq!(requests[4]["arguments"]["path"], POWERSHELL_GUEST_PATH);
-        let args = requests[4]["arguments"]["arg"].as_array().unwrap();
-        assert_eq!(args[6], "-Mode");
-        assert_eq!(args[7], "tree");
-        assert_eq!(args[8], "-MaxDepth");
-        assert_eq!(args[9], "4");
-        assert_eq!(args[10], "-MaxNodes");
-        assert_eq!(args[11], "50");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["execute"] == "guest-file-read")
+        );
+        assert!(requests.iter().any(|request| {
+            request["arguments"]["path"] == r"C:\Windows\System32\schtasks.exe"
+                && request["arguments"]["arg"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "/Create"))
+        }));
+        let xml = task_xml_payloads(&requests).join(
+            "
+",
+        );
+        assert!(xml.contains("InteractiveToken"));
+        assert!(xml.contains("-Mode tree -MaxDepth 4 -MaxNodes 50 -OutputPath"));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request["arguments"]["path"] == POWERSHELL_GUEST_PATH)
+        );
     }
 
     #[test]
-    fn invoke_passes_node_path_to_helper() {
+    fn invoke_passes_node_path_to_interactive_task() {
         let helper_stdout = br#"{"ok":true,"pattern":"invoke"}"#.to_vec();
         let (mut control, written) = control(vec![(0, helper_stdout, Vec::new())]);
         let output = execute_operation(
@@ -320,12 +362,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output["pattern"], "invoke");
-        let requests = written.borrow();
-        let args = requests[4]["arguments"]["arg"].as_array().unwrap();
-        assert_eq!(args[6], "-Mode");
-        assert_eq!(args[7], "invoke");
-        assert_eq!(args[8], "-Path");
-        assert_eq!(args[9], "0/1/2");
+        let xml = task_xml_payloads(&written.borrow()).join(
+            "
+",
+        );
+        assert!(xml.contains("-Mode invoke -Path 0/1/2 -OutputPath"));
     }
 
     #[test]
@@ -341,9 +382,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output["pattern"], "value");
-        let requests = written.borrow();
-        let args = requests[4]["arguments"]["arg"].as_array().unwrap();
-        assert_eq!(args[10], "-TextBase64");
-        assert_eq!(args[11], "");
+        let xml = task_xml_payloads(&written.borrow()).join(
+            "
+",
+        );
+        assert!(xml.contains("-Mode settext -Path 0/1/2 -TextBase64  -OutputPath"));
     }
 }

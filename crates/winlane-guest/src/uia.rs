@@ -2,7 +2,8 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use winlane_contracts::{FileTransferRef, UiNodeRef};
 
@@ -11,18 +12,35 @@ use crate::qga::{QgaClient, QgaError, QgaTransport};
 pub const UIA_HELPER_GUEST_PATH: &str = r"C:\Windows\Temp\winlane-uia.ps1";
 pub const POWERSHELL_GUEST_PATH: &str =
     r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+const SCHTASKS_GUEST_PATH: &str = r"C:\Windows\System32\schtasks.exe";
+const CMD_GUEST_PATH: &str = r"C:\Windows\System32\cmd.exe";
+const PROVISIONED_INTERACTIVE_USER: &str = "winlane";
+static INTERACTIVE_TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub const UIA_HELPER_SCRIPT: &str = r##"
 param(
     [Parameter(Mandatory=$true)][string]$Mode,
     [string]$Path = "",
     [string]$TextBase64 = "",
+    [string]$OutputPath = "",
     [int]$MaxDepth = 8,
     [int]$MaxNodes = 2000
 )
 
+function Write-Result($obj) {
+    $json = $obj | ConvertTo-Json -Depth 40 -Compress
+    if ($OutputPath) {
+        $encoding = New-Object System.Text.UTF8Encoding($true)
+        $temporaryOutputPath = "$OutputPath.tmp"
+        [System.IO.File]::WriteAllText($temporaryOutputPath, $json, $encoding)
+        [System.IO.File]::Move($temporaryOutputPath, $OutputPath)
+    } else {
+        Write-Output $json
+    }
+}
+
 trap {
-    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress
+    Write-Result ([pscustomobject]@{ ok = $false; error = $_.Exception.Message })
     exit 1
 }
 
@@ -53,9 +71,13 @@ function Convert-Element($element, [int]$depth, [string]$path) {
         $child = $walker.GetFirstChild($element)
         $index = 0
         while ($null -ne $child -and $script:NodeCount -lt $script:MaxNodeCount) {
-            $item = Convert-Element $child ($depth + 1) "$path/$index"
-            if ($null -ne $item) { $children += $item }
-            $child = $walker.GetNextSibling($child)
+            try {
+                $item = Convert-Element $child ($depth + 1) "$path/$index"
+                if ($null -ne $item) { $children += $item }
+                $child = $walker.GetNextSibling($child)
+            } catch {
+                $child = $null
+            }
             $index += 1
         }
     }
@@ -96,12 +118,12 @@ function Find-ElementByPath([string]$path) {
 if ($Mode -eq "tree") {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $tree = Convert-Element $root 0 "0"
-    [pscustomobject]@{
+    Write-Result ([pscustomobject]@{
         ok = $true
         nodeCount = $script:NodeCount
         truncated = ($script:NodeCount -ge $script:MaxNodeCount)
         root = $tree
-    } | ConvertTo-Json -Depth 40 -Compress
+    })
     exit 0
 }
 
@@ -110,19 +132,19 @@ if ($Mode -eq "invoke") {
     $invoke = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     if ($null -ne $invoke) {
         $invoke.Invoke()
-        [pscustomobject]@{ ok = $true; pattern = "invoke" } | ConvertTo-Json -Compress
+        Write-Result ([pscustomobject]@{ ok = $true; pattern = "invoke" })
         exit 0
     }
     $toggle = $element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
     if ($null -ne $toggle) {
         $toggle.Toggle()
-        [pscustomobject]@{ ok = $true; pattern = "toggle" } | ConvertTo-Json -Compress
+        Write-Result ([pscustomobject]@{ ok = $true; pattern = "toggle" })
         exit 0
     }
     $select = $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     if ($null -ne $select) {
         $select.Select()
-        [pscustomobject]@{ ok = $true; pattern = "selection_item" } | ConvertTo-Json -Compress
+        Write-Result ([pscustomobject]@{ ok = $true; pattern = "selection_item" })
         exit 0
     }
     throw "element has no invoke, toggle, or selection-item pattern"
@@ -134,7 +156,7 @@ if ($Mode -eq "settext") {
     if ($null -eq $value) { throw "element has no value pattern" }
     $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($TextBase64))
     $value.SetValue($text)
-    [pscustomobject]@{ ok = $true; pattern = "value" } | ConvertTo-Json -Compress
+    Write-Result ([pscustomobject]@{ ok = $true; pattern = "value" })
     exit 0
 }
 
@@ -332,20 +354,157 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         let mut full_args = vec![
             "-NoProfile".to_owned(),
             "-NonInteractive".to_owned(),
+            "-WindowStyle".to_owned(),
+            "Hidden".to_owned(),
             "-ExecutionPolicy".to_owned(),
             "Bypass".to_owned(),
             "-File".to_owned(),
             self.helper_path.clone(),
         ];
         full_args.extend(args.iter().cloned());
-        let capture = self.run_process_blocking(POWERSHELL_GUEST_PATH, &full_args, timeout_ms)?;
-        if capture.exit_code != Some(0) {
+        self.run_interactive_powershell(&full_args, timeout_ms)
+    }
+
+    fn run_interactive_powershell(
+        &mut self,
+        args: &[String],
+        timeout_ms: u64,
+    ) -> UiaResult<ProcessCapture> {
+        let counter = INTERACTIVE_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let unique = format!("{}-{}-{}", std::process::id(), unix_nanos, counter);
+        let task_name = format!("WinlaneUIA{unique}");
+        let xml_guest_path = format!(r"C:\Windows\Temp\winlane-uia-{unique}.xml");
+        let output_guest_path = format!(r"C:\Windows\Temp\winlane-uia-{unique}.json");
+        let result = self.run_interactive_task(
+            &task_name,
+            &xml_guest_path,
+            &output_guest_path,
+            args,
+            timeout_ms,
+        );
+        let _ = self.run_process_blocking(
+            SCHTASKS_GUEST_PATH,
+            &[
+                "/Delete".to_owned(),
+                "/TN".to_owned(),
+                task_name,
+                "/F".to_owned(),
+            ],
+            5_000,
+        );
+        let _ = self.run_process_blocking(
+            CMD_GUEST_PATH,
+            &[
+                "/c".to_owned(),
+                "del".to_owned(),
+                "/f".to_owned(),
+                "/q".to_owned(),
+                xml_guest_path,
+                output_guest_path.clone(),
+                format!("{output_guest_path}.tmp"),
+            ],
+            5_000,
+        );
+        result
+    }
+
+    fn run_interactive_task(
+        &mut self,
+        task_name: &str,
+        xml_guest_path: &str,
+        output_guest_path: &str,
+        args: &[String],
+        timeout_ms: u64,
+    ) -> UiaResult<ProcessCapture> {
+        let _ = self.run_process_blocking(
+            CMD_GUEST_PATH,
+            &[
+                "/c".to_owned(),
+                "del".to_owned(),
+                "/f".to_owned(),
+                "/q".to_owned(),
+                output_guest_path.to_owned(),
+            ],
+            5_000,
+        );
+        let helper_arguments = format!("{} -OutputPath {}", args.join(" "), output_guest_path);
+        let mut create_errors = Vec::new();
+        let mut created = false;
+        for principal in ["INTERACTIVE", PROVISIONED_INTERACTIVE_USER] {
+            let xml = scheduled_task_xml(task_name, principal, &helper_arguments);
+            self.client
+                .write_guest_file(xml_guest_path, &utf16le_bytes(&xml))?;
+            let create = self.run_process_blocking(
+                SCHTASKS_GUEST_PATH,
+                &[
+                    "/Create".to_owned(),
+                    "/TN".to_owned(),
+                    task_name.to_owned(),
+                    "/XML".to_owned(),
+                    xml_guest_path.to_owned(),
+                    "/F".to_owned(),
+                ],
+                10_000,
+            )?;
+            if create.exit_code == Some(0) {
+                created = true;
+                break;
+            }
+            create_errors.push(format!(
+                "{}: {}",
+                principal,
+                process_output_summary(&create)
+            ));
+        }
+        if !created {
             return Err(UiaError::Helper {
-                exit_code: capture.exit_code,
-                message: String::from_utf8_lossy(&capture.stderr).into_owned(),
+                exit_code: Some(1),
+                message: format!(
+                    "interactive task creation failed ({})",
+                    create_errors.join("; ")
+                ),
             });
         }
-        Ok(capture)
+        let run = self.run_process_blocking(
+            SCHTASKS_GUEST_PATH,
+            &["/Run".to_owned(), "/TN".to_owned(), task_name.to_owned()],
+            10_000,
+        )?;
+        if run.exit_code != Some(0) {
+            return Err(UiaError::Helper {
+                exit_code: run.exit_code,
+                message: format!(
+                    "interactive task start failed: {}",
+                    process_output_summary(&run)
+                ),
+            });
+        }
+
+        let started = Instant::now();
+        loop {
+            match self
+                .client
+                .read_guest_file(output_guest_path, crate::MAX_TRANSFER_BYTES)
+            {
+                Ok(bytes) if !bytes.is_empty() => {
+                    return Ok(ProcessCapture {
+                        exit_code: Some(0),
+                        stdout: bytes,
+                        stderr: Vec::new(),
+                    });
+                }
+                Ok(_) | Err(QgaError::Guest { .. }) => {}
+                Err(error) => return Err(UiaError::Qga(error)),
+            }
+            if started.elapsed() > Duration::from_millis(timeout_ms) {
+                return Err(UiaError::Timeout(timeout_ms));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
     }
 
     pub fn run_process_blocking(
@@ -376,6 +535,66 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
             }
         }
     }
+}
+
+fn scheduled_task_xml(task_name: &str, principal: &str, arguments: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>winlane interactive UIA helper {}</Description></RegistrationInfo>
+  <Triggers><TimeTrigger><Enabled>false</Enabled><StartBoundary>2024-01-01T00:00:00</StartBoundary></TimeTrigger></Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>{}</Command><Arguments>{}</Arguments></Exec>
+  </Actions>
+</Task>
+"#,
+        xml_escape(task_name),
+        xml_escape(principal),
+        xml_escape(POWERSHELL_GUEST_PATH),
+        xml_escape(arguments)
+    )
+}
+
+fn utf16le_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn process_output_summary(capture: &ProcessCapture) -> String {
+    let stdout = String::from_utf8_lossy(&capture.stdout);
+    let stderr = String::from_utf8_lossy(&capture.stderr);
+    format!(
+        "exit {:?}, stdout '{}', stderr '{}'",
+        capture.exit_code,
+        stdout.trim(),
+        stderr.trim()
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,7 +649,7 @@ fn valid_absolute_windows_path(path: &str) -> bool {
 
 fn parse_helper_json(stdout: &[u8]) -> UiaResult<Value> {
     let text = std::str::from_utf8(stdout).map_err(|_| UiaError::InvalidUtf8)?;
-    let value: Value = serde_json::from_str(text.trim())?;
+    let value: Value = serde_json::from_str(text.trim().trim_start_matches('\u{feff}'))?;
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(value)
     } else {
@@ -482,6 +701,32 @@ mod tests {
         assert!(UIA_HELPER_SCRIPT.contains("InvokePattern"));
         assert!(UIA_HELPER_SCRIPT.contains("ValuePattern"));
         assert!(UIA_HELPER_SCRIPT.contains("ConvertTo-Json"));
+    }
+
+    #[test]
+    fn helper_writes_result_to_output_file() {
+        assert!(UIA_HELPER_SCRIPT.contains("OutputPath"));
+        assert!(UIA_HELPER_SCRIPT.contains("WriteAllText"));
+    }
+
+    #[test]
+    fn scheduled_task_xml_escapes_principal_and_arguments() {
+        let xml = scheduled_task_xml(
+            "WinlaneUIAProbe",
+            "winlane",
+            "-File helper.ps1 -OutputPath out.json & <test>",
+        );
+        assert!(xml.contains("<UserId>winlane</UserId>"));
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("&amp; &lt;test&gt;"));
+        let bytes = utf16le_bytes(&xml);
+        assert_eq!(&bytes[..2], &[0xff, 0xfe]);
+    }
+
+    #[test]
+    fn parses_utf8_bom_helper_json() {
+        let value = parse_helper_json("\u{feff}{\"ok\":true}".as_bytes()).unwrap();
+        assert_eq!(value["ok"], true);
     }
 
     #[test]
