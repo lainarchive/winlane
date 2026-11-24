@@ -1,0 +1,4 @@
+protocol=sixel
+source=sixel TERM
+truecolor=true
+tmux=false
