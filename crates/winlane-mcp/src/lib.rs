@@ -1,0 +1,21 @@
+//! Model Context Protocol adapter exposing machine-control tools.
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum WinlaneMcpError {
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
+}
+
+pub fn implementation_status() -> &'static str {
+    "scaffold-only"
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reports_scaffold_status() {
+        assert_eq!(super::implementation_status(), "scaffold-only");
+    }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "winlane-cli"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+winlane-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
