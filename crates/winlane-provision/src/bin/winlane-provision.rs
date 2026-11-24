@@ -92,6 +92,8 @@ fn run() -> Result<ExitCode, String> {
         cpus,
         disk_gb,
         iso_path: Some(iso),
+        base_image_path: None,
+        guest_agent: true,
         network,
         tpm: true,
         boot: BootMode::Uefi,

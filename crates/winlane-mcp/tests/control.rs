@@ -28,6 +28,8 @@ async fn mcp_tools_map_to_serialized_control_plane() {
         cpus: 1,
         disk_gb: 16,
         iso_path: None,
+        base_image_path: None,
+        guest_agent: false,
         network: NetworkMode::Isolated,
         tpm: false,
         boot: BootMode::Bios,

@@ -1103,6 +1103,8 @@ mod tests {
             cpus: 4,
             disk_gb: 80,
             iso_path: Some("/tmp/windows.iso".to_string()),
+            base_image_path: None,
+            guest_agent: true,
             network: NetworkMode::Isolated,
             tpm: true,
             boot: BootMode::Uefi,

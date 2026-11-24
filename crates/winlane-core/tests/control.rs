@@ -21,6 +21,8 @@ fn spec(name: &str) -> MachineSpec {
         cpus: 1,
         disk_gb: 16,
         iso_path: None,
+        base_image_path: None,
+        guest_agent: false,
         network: NetworkMode::Isolated,
         tpm: false,
         boot: BootMode::Bios,

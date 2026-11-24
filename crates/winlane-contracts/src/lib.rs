@@ -46,6 +46,10 @@ pub struct MachineSpec {
     pub cpus: u16,
     pub disk_gb: u32,
     pub iso_path: Option<String>,
+    #[serde(default)]
+    pub base_image_path: Option<String>,
+    #[serde(default)]
+    pub guest_agent: bool,
     pub network: NetworkMode,
     pub tpm: bool,
     pub boot: BootMode,
@@ -292,6 +296,8 @@ mod tests {
             cpus: 4,
             disk_gb: 64,
             iso_path: None,
+            base_image_path: None,
+            guest_agent: false,
             network: NetworkMode::Isolated,
             tpm: true,
             boot: BootMode::Uefi,
