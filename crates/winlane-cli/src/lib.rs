@@ -1,6 +1,7 @@
-//! Narrow command line entrypoint for machine control and terminal viewing.
+//! Narrow command line entrypoint for machine control, guest control, and terminal viewing.
 
 pub mod args;
+pub mod guest;
 pub mod live;
 pub mod machine;
 
@@ -9,9 +10,10 @@ use std::io::Write as _;
 use thiserror::Error;
 
 pub use args::{
-    Command, CreateArgs, DaemonArgs, MachineArgs, MachineCommand, McpArgs, USAGE, VIEW_USAGE,
-    ViewArgs, parse_args,
+    Command, CreateArgs, DaemonArgs, GuestCommand, MachineArgs, MachineCommand, McpArgs, USAGE,
+    VIEW_USAGE, ViewArgs, parse_args,
 };
+pub use guest::run_guest_command;
 pub use live::{LiveViewConfig, capture_frame, run_live_view};
 pub use machine::{run_daemon, run_machine_command, run_mcp};
 
@@ -35,6 +37,10 @@ pub enum CliError {
     Mcp(#[from] winlane_mcp::McpError),
     #[error(transparent)]
     View(#[from] winlane_view::ViewError),
+    #[error(transparent)]
+    Uia(#[from] winlane_guest::uia::UiaError),
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
 }
 
 pub async fn run(args: Vec<String>) -> CliResult<()> {
@@ -53,9 +59,14 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
             run_machine_command(&machine, &mut output).await
         }
         Command::Mcp(mcp) => run_mcp(mcp).await,
+        Command::Guest(guest) => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_guest_command(&guest, &mut output).await
+        }
     }
 }
 
 pub fn implementation_status() -> &'static str {
-    "machine-lifecycle"
+    "guest-control-cli"
 }

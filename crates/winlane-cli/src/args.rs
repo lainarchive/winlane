@@ -1,16 +1,27 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use winlane_contracts::{BootMode, NetworkMode};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine start|stop|status --control-socket PATH --machine-json JSON\n       winlane mcp --control-socket PATH [--evidence-dir PATH]";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine start|stop|status --control-socket PATH --machine-json JSON\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
 pub const MACHINE_ACTION_USAGE: &str =
     "usage: winlane machine start|stop|status --control-socket PATH --machine-json JSON";
 pub const MCP_USAGE: &str = "usage: winlane mcp --control-socket PATH [--evidence-dir PATH]";
+pub const GUEST_UI_TREE_USAGE: &str =
+    "usage: winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]";
+pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke --machine-json JSON --node PATH";
+pub const GUEST_SET_TEXT_USAGE: &str =
+    "usage: winlane guest set-text --machine-json JSON --node PATH --text TEXT";
+pub const GUEST_RUN_USAGE: &str = "usage: winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]";
+pub const GUEST_IMPORT_USAGE: &str =
+    "usage: winlane guest import --machine-json JSON --host-path PATH --guest-path PATH";
+pub const GUEST_EXPORT_USAGE: &str =
+    "usage: winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewArgs {
@@ -62,12 +73,78 @@ pub struct McpArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestUiTreeArgs {
+    pub machine_json: String,
+    pub max_depth: u16,
+    pub max_nodes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestInvokeArgs {
+    pub machine_json: String,
+    pub node: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSetTextArgs {
+    pub machine_json: String,
+    pub node: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestRunArgs {
+    pub machine_json: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestImportArgs {
+    pub machine_json: String,
+    pub host_path: PathBuf,
+    pub guest_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestExportArgs {
+    pub machine_json: String,
+    pub guest_path: String,
+    pub host_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestCommand {
+    UiTree(GuestUiTreeArgs),
+    Invoke(GuestInvokeArgs),
+    SetText(GuestSetTextArgs),
+    Run(GuestRunArgs),
+    Import(GuestImportArgs),
+    Export(GuestExportArgs),
+}
+
+impl GuestCommand {
+    pub fn machine_json(&self) -> &str {
+        match self {
+            Self::UiTree(args) => &args.machine_json,
+            Self::Invoke(args) => &args.machine_json,
+            Self::SetText(args) => &args.machine_json,
+            Self::Run(args) => &args.machine_json,
+            Self::Import(args) => &args.machine_json,
+            Self::Export(args) => &args.machine_json,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
     View(ViewArgs),
     Daemon(DaemonArgs),
     Machine(MachineCommand),
     Mcp(McpArgs),
+    Guest(GuestCommand),
 }
 
 pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
@@ -79,6 +156,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
         "daemon" => parse_daemon_args(&args[1..]).map(Command::Daemon),
         "machine" => parse_machine_args(&args[1..]).map(Command::Machine),
         "mcp" => parse_mcp_args(&args[1..]).map(Command::Mcp),
+        "guest" => parse_guest_args(&args[1..]).map(Command::Guest),
         command => Err(CliError::Usage(format!(
             "unknown command {command}; {USAGE}"
         ))),
@@ -333,6 +411,183 @@ fn parse_mcp_args(args: &[String]) -> Result<McpArgs, CliError> {
     })
 }
 
+fn parse_guest_args(args: &[String]) -> Result<GuestCommand, CliError> {
+    let Some(action) = args.first() else {
+        return Err(CliError::Usage(format!("missing guest action; {USAGE}")));
+    };
+    match action.as_str() {
+        "ui-tree" => parse_guest_ui_tree_args(&args[1..]).map(GuestCommand::UiTree),
+        "invoke" => parse_guest_invoke_args(&args[1..]).map(GuestCommand::Invoke),
+        "set-text" => parse_guest_set_text_args(&args[1..]).map(GuestCommand::SetText),
+        "run" => parse_guest_run_args(&args[1..]).map(GuestCommand::Run),
+        "import" => parse_guest_import_args(&args[1..]).map(GuestCommand::Import),
+        "export" => parse_guest_export_args(&args[1..]).map(GuestCommand::Export),
+        action => Err(CliError::Usage(format!(
+            "unknown guest action {action}; {USAGE}"
+        ))),
+    }
+}
+
+fn parse_guest_ui_tree_args(args: &[String]) -> Result<GuestUiTreeArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_UI_TREE_USAGE,
+        &["--machine-json", "--max-depth", "--max-nodes"],
+    )?;
+    let max_depth = match options.one("--max-depth", GUEST_UI_TREE_USAGE)? {
+        Some(value) => parse_bounded(value, "max-depth", 1, 32, GUEST_UI_TREE_USAGE)?,
+        None => 8,
+    };
+    let max_nodes = match options.one("--max-nodes", GUEST_UI_TREE_USAGE)? {
+        Some(value) => parse_bounded(value, "max-nodes", 1, 20_000, GUEST_UI_TREE_USAGE)?,
+        None => 2_000,
+    };
+    Ok(GuestUiTreeArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_UI_TREE_USAGE)?
+            .to_string(),
+        max_depth,
+        max_nodes,
+    })
+}
+
+fn parse_guest_invoke_args(args: &[String]) -> Result<GuestInvokeArgs, CliError> {
+    let options = ParsedOptions::parse(args, GUEST_INVOKE_USAGE, &["--machine-json", "--node"])?;
+    Ok(GuestInvokeArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_INVOKE_USAGE)?
+            .to_string(),
+        node: options.required("--node", GUEST_INVOKE_USAGE)?.to_string(),
+    })
+}
+
+fn parse_guest_set_text_args(args: &[String]) -> Result<GuestSetTextArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_SET_TEXT_USAGE,
+        &["--machine-json", "--node", "--text"],
+    )?;
+    Ok(GuestSetTextArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_SET_TEXT_USAGE)?
+            .to_string(),
+        node: options
+            .required("--node", GUEST_SET_TEXT_USAGE)?
+            .to_string(),
+        text: options
+            .required("--text", GUEST_SET_TEXT_USAGE)?
+            .to_string(),
+    })
+}
+
+fn parse_guest_run_args(args: &[String]) -> Result<GuestRunArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_RUN_USAGE,
+        &["--machine-json", "--command", "--arg", "--timeout-ms"],
+    )?;
+    let timeout_ms = match options.one("--timeout-ms", GUEST_RUN_USAGE)? {
+        Some(value) => parse_bounded(value, "timeout-ms", 1, 600_000, GUEST_RUN_USAGE)?,
+        None => 30_000,
+    };
+    Ok(GuestRunArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_RUN_USAGE)?
+            .to_string(),
+        command: options.required("--command", GUEST_RUN_USAGE)?.to_string(),
+        args: options
+            .repeated("--arg")
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        timeout_ms,
+    })
+}
+
+fn parse_guest_import_args(args: &[String]) -> Result<GuestImportArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_IMPORT_USAGE,
+        &["--machine-json", "--host-path", "--guest-path"],
+    )?;
+    Ok(GuestImportArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_IMPORT_USAGE)?
+            .to_string(),
+        host_path: PathBuf::from(options.required("--host-path", GUEST_IMPORT_USAGE)?),
+        guest_path: options
+            .required("--guest-path", GUEST_IMPORT_USAGE)?
+            .to_string(),
+    })
+}
+
+fn parse_guest_export_args(args: &[String]) -> Result<GuestExportArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_EXPORT_USAGE,
+        &["--machine-json", "--guest-path", "--host-path"],
+    )?;
+    Ok(GuestExportArgs {
+        machine_json: options
+            .required("--machine-json", GUEST_EXPORT_USAGE)?
+            .to_string(),
+        guest_path: options
+            .required("--guest-path", GUEST_EXPORT_USAGE)?
+            .to_string(),
+        host_path: PathBuf::from(options.required("--host-path", GUEST_EXPORT_USAGE)?),
+    })
+}
+
+struct ParsedOptions<'a> {
+    values: HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> ParsedOptions<'a> {
+    fn parse(
+        args: &'a [String],
+        usage: &str,
+        value_flags: &[&str],
+    ) -> Result<ParsedOptions<'a>, CliError> {
+        let mut values = HashMap::new();
+        let mut index = 0;
+        while index < args.len() {
+            let flag = args[index].as_str();
+            if !value_flags.contains(&flag) {
+                return Err(CliError::Usage(format!(
+                    "unknown guest flag {flag}; {usage}"
+                )));
+            }
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| CliError::Usage(format!("missing value for {flag}; {usage}")))?;
+            values
+                .entry(flag)
+                .or_insert_with(Vec::new)
+                .push(value.as_str());
+            index += 1;
+        }
+        Ok(ParsedOptions { values })
+    }
+
+    fn one(&self, flag: &str, usage: &str) -> Result<Option<&'a str>, CliError> {
+        match self.values.get(flag).map(Vec::as_slice) {
+            None => Ok(None),
+            Some([value]) => Ok(Some(*value)),
+            Some(_) => Err(CliError::Usage(format!("duplicate {flag}; {usage}"))),
+        }
+    }
+
+    fn required(&self, flag: &str, usage: &str) -> Result<&'a str, CliError> {
+        self.one(flag, usage)?
+            .ok_or_else(|| CliError::Usage(format!("missing {flag}; {usage}")))
+    }
+
+    fn repeated(&self, flag: &str) -> Vec<&'a str> {
+        self.values.get(flag).cloned().unwrap_or_default()
+    }
+}
+
 fn take_value<'a>(args: &'a [String], index: &mut usize, usage: &str) -> Result<&'a str, CliError> {
     let flag = &args[*index];
     *index += 1;
@@ -549,5 +804,149 @@ mod tests {
             "false".to_string(),
         ]);
         assert!(matches!(result, Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn guest_ui_tree_defaults_and_bounds_parse() {
+        let minimal = vec![
+            "guest".to_string(),
+            "ui-tree".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&minimal).unwrap(),
+            Command::Guest(GuestCommand::UiTree(GuestUiTreeArgs {
+                machine_json: "{}".to_string(),
+                max_depth: 8,
+                max_nodes: 2_000,
+            }))
+        );
+
+        let bounded = vec![
+            "guest".to_string(),
+            "ui-tree".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--max-depth".to_string(),
+            "4".to_string(),
+            "--max-nodes".to_string(),
+            "50".to_string(),
+        ];
+        let Command::Guest(GuestCommand::UiTree(tree)) = parse_args(&bounded).unwrap() else {
+            panic!("expected ui-tree command");
+        };
+        assert_eq!(tree.max_depth, 4);
+        assert_eq!(tree.max_nodes, 50);
+    }
+
+    #[test]
+    fn guest_run_preserves_repeated_args_in_order() {
+        let args = vec![
+            "guest".to_string(),
+            "run".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--command".to_string(),
+            r"C:\Windows\System32\cmd.exe".to_string(),
+            "--arg".to_string(),
+            "/c".to_string(),
+            "--arg".to_string(),
+            "echo ok".to_string(),
+            "--timeout-ms".to_string(),
+            "5000".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::Guest(GuestCommand::Run(GuestRunArgs {
+                machine_json: "{}".to_string(),
+                command: r"C:\Windows\System32\cmd.exe".to_string(),
+                args: vec!["/c".to_string(), "echo ok".to_string()],
+                timeout_ms: 5_000,
+            }))
+        );
+    }
+
+    #[test]
+    fn guest_file_transfer_commands_parse_paths() {
+        let import = parse_args(&[
+            "guest".to_string(),
+            "import".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--host-path".to_string(),
+            "/tmp/in.txt".to_string(),
+            "--guest-path".to_string(),
+            r"C:\Temp\in.txt".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(import, Command::Guest(GuestCommand::Import(_))));
+
+        let export = parse_args(&[
+            "guest".to_string(),
+            "export".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--guest-path".to_string(),
+            r"C:\Temp\out.txt".to_string(),
+            "--host-path".to_string(),
+            "/tmp/out.txt".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(export, Command::Guest(GuestCommand::Export(_))));
+    }
+
+    #[test]
+    fn guest_node_commands_parse_paths_and_text() {
+        let invoke = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--node".to_string(),
+            "0/1/2".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(invoke, Command::Guest(GuestCommand::Invoke(_))));
+
+        let set_text = parse_args(&[
+            "guest".to_string(),
+            "set-text".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--node".to_string(),
+            "0/1/2".to_string(),
+            "--text".to_string(),
+            "hello".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(set_text, Command::Guest(GuestCommand::SetText(_))));
+    }
+
+    #[test]
+    fn guest_parser_rejects_duplicate_single_value_and_bad_timeout() {
+        let duplicate = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--node".to_string(),
+            "0".to_string(),
+        ]);
+        assert!(matches!(duplicate, Err(CliError::Usage(_))));
+
+        let timeout = parse_args(&[
+            "guest".to_string(),
+            "run".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--command".to_string(),
+            r"C:\Windows\System32\cmd.exe".to_string(),
+            "--timeout-ms".to_string(),
+            "600001".to_string(),
+        ]);
+        assert!(matches!(timeout, Err(CliError::Usage(_))));
     }
 }

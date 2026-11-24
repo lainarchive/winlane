@@ -79,7 +79,7 @@ fn machine_handle(args: &MachineArgs) -> CliResult<MachineHandle> {
     Ok(serde_json::from_str(&args.machine_json)?)
 }
 
-fn write_json_line(output: &mut impl Write, value: &Value) -> CliResult<()> {
+pub(crate) fn write_json_line(output: &mut impl Write, value: &Value) -> CliResult<()> {
     serde_json::to_writer(&mut *output, value)?;
     output.write_all(b"\n")?;
     Ok(())
