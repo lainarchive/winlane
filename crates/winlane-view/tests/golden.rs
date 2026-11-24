@@ -81,7 +81,7 @@ fn sixel_is_detected_but_not_a_supported_renderer() {
         "sixel.env",
         include_bytes!("../../../tests/fixtures/terminal/golden/sixel-detection.golden"),
     );
-    assert_eq!(GraphicsProtocol::Sixel.support().is_supported(), false);
+    assert!(!GraphicsProtocol::Sixel.support().is_supported());
 }
 
 #[test]
