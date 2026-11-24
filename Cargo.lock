@@ -701,6 +701,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 name = "winlane-cli"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "crossterm",
  "serde",
  "serde_json",
@@ -709,6 +710,7 @@ dependencies = [
  "tokio",
  "winlane-contracts",
  "winlane-core",
+ "winlane-guest",
  "winlane-ipc",
  "winlane-mcp",
  "winlane-view",

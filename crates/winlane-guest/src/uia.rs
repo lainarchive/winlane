@@ -165,6 +165,16 @@ pub enum UiaError {
     InvalidElementRef,
     #[error("text input exceeds {0} bytes")]
     InputTooLarge(usize),
+    #[error("guest command must be an absolute Windows path")]
+    InvalidCommandPath,
+    #[error("guest file path must be nonempty and contain no control characters")]
+    InvalidGuestPath,
+    #[error("process argument contains a control character or exceeds 8192 bytes")]
+    InvalidProcessArgument,
+    #[error("process timeout must be 1..=600000 milliseconds")]
+    InvalidTimeout,
+    #[error("file transfer is {actual} bytes; maximum is {maximum}")]
+    TransferTooLarge { actual: u64, maximum: u64 },
 }
 
 pub type UiaResult<T> = Result<T, UiaError>;
@@ -225,10 +235,27 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         host_path: &std::path::Path,
         guest_path: &str,
     ) -> UiaResult<FileTransferRef> {
+        validate_guest_file_path(guest_path)?;
+        let metadata = std::fs::metadata(host_path).map_err(|error| UiaError::HostIo {
+            path: host_path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+        if metadata.len() > crate::MAX_TRANSFER_BYTES {
+            return Err(UiaError::TransferTooLarge {
+                actual: metadata.len(),
+                maximum: crate::MAX_TRANSFER_BYTES,
+            });
+        }
         let bytes = std::fs::read(host_path).map_err(|error| UiaError::HostIo {
             path: host_path.to_string_lossy().into_owned(),
             source: error,
         })?;
+        if bytes.len() as u64 > crate::MAX_TRANSFER_BYTES {
+            return Err(UiaError::TransferTooLarge {
+                actual: bytes.len() as u64,
+                maximum: crate::MAX_TRANSFER_BYTES,
+            });
+        }
         self.client.write_guest_file(guest_path, &bytes)?;
         Ok(FileTransferRef {
             sha256: sha256_hex(&bytes),
@@ -243,6 +270,7 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         guest_path: &str,
         host_path: &std::path::Path,
     ) -> UiaResult<FileTransferRef> {
+        validate_guest_file_path(guest_path)?;
         let bytes = self
             .client
             .read_guest_file(guest_path, crate::MAX_TRANSFER_BYTES)?;
@@ -326,6 +354,7 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         args: &[String],
         timeout_ms: u64,
     ) -> UiaResult<ProcessCapture> {
+        validate_process_inputs(command, args, timeout_ms)?;
         let pid = self.client.exec_start(command, args, None)?;
         let started = Instant::now();
         loop {
@@ -354,6 +383,49 @@ pub struct ProcessCapture {
     pub exit_code: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+fn validate_process_inputs(command: &str, args: &[String], timeout_ms: u64) -> UiaResult<()> {
+    validate_absolute_windows_command(command)?;
+    for argument in args {
+        if argument.len() > 8192 || argument.chars().any(char::is_control) {
+            return Err(UiaError::InvalidProcessArgument);
+        }
+    }
+    if !(1..=600_000).contains(&timeout_ms) {
+        return Err(UiaError::InvalidTimeout);
+    }
+    Ok(())
+}
+
+fn validate_absolute_windows_command(command: &str) -> UiaResult<()> {
+    if valid_absolute_windows_path(command) {
+        Ok(())
+    } else {
+        Err(UiaError::InvalidCommandPath)
+    }
+}
+
+fn validate_guest_file_path(path: &str) -> UiaResult<()> {
+    if !path.is_empty() && path.len() <= 32_767 && !path.chars().any(char::is_control) {
+        Ok(())
+    } else {
+        Err(UiaError::InvalidGuestPath)
+    }
+}
+
+fn valid_absolute_windows_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > 32_767 || path.chars().any(char::is_control) {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    let drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let unc_absolute = bytes.len() > 2
+        && ((bytes[0] == b'\\' && bytes[1] == b'\\') || (bytes[0] == b'/' && bytes[1] == b'/'));
+    drive_absolute || unc_absolute
 }
 
 fn parse_helper_json(stdout: &[u8]) -> UiaResult<Value> {
@@ -425,5 +497,54 @@ mod tests {
     fn parses_successful_helper_json() {
         let value = parse_helper_json(br#"{"ok":true,"generation":0}"#).unwrap();
         assert_eq!(value["ok"], true);
+    }
+
+    #[test]
+    fn validates_absolute_windows_command_paths() {
+        assert!(validate_absolute_windows_command(r"C:\Windows\System32\cmd.exe").is_ok());
+        assert!(validate_absolute_windows_command("c:/windows/system32/cmd.exe").is_ok());
+        assert!(validate_absolute_windows_command(r"\\server\share\tool.exe").is_ok());
+        assert!(matches!(
+            validate_absolute_windows_command("powershell.exe"),
+            Err(UiaError::InvalidCommandPath)
+        ));
+        assert!(matches!(
+            validate_absolute_windows_command(r"C:Windows\System32\cmd.exe"),
+            Err(UiaError::InvalidCommandPath)
+        ));
+        assert!(matches!(
+            validate_absolute_windows_command(r"\Windows\System32\cmd.exe"),
+            Err(UiaError::InvalidCommandPath)
+        ));
+    }
+
+    #[test]
+    fn validates_process_inputs_before_guest_execution() {
+        assert!(
+            validate_process_inputs(
+                r"C:\Windows\System32\cmd.exe",
+                &["/c".to_string(), String::new()],
+                1000,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_process_inputs(r"C:\Windows\System32\cmd.exe", &["bad\0".to_string()], 1000),
+            Err(UiaError::InvalidProcessArgument)
+        ));
+        assert!(matches!(
+            validate_process_inputs(r"C:\Windows\System32\cmd.exe", &[], 0),
+            Err(UiaError::InvalidTimeout)
+        ));
+    }
+
+    #[test]
+    fn validates_guest_file_paths_without_requiring_absolute_form() {
+        assert!(validate_guest_file_path(r"C:\Temp\file.txt").is_ok());
+        assert!(validate_guest_file_path(r"Temp\file.txt").is_ok());
+        assert!(matches!(
+            validate_guest_file_path("bad\0path"),
+            Err(UiaError::InvalidGuestPath)
+        ));
     }
 }
