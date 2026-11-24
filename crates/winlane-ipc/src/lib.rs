@@ -144,10 +144,17 @@ pub async fn serve_unix_control(
 ) -> IpcResult<()> {
     let socket_path = socket_path.as_ref();
     if tokio::fs::try_exists(socket_path).await? {
-        return Err(IpcError::Protocol(format!(
-            "control socket already exists: {}",
-            socket_path.display()
-        )));
+        match UnixStream::connect(socket_path).await {
+            Ok(_) => {
+                return Err(IpcError::Protocol(format!(
+                    "control socket is already active: {}",
+                    socket_path.display()
+                )));
+            }
+            Err(_) => {
+                tokio::fs::remove_file(socket_path).await?;
+            }
+        }
     }
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -155,13 +162,31 @@ pub async fn serve_unix_control(
     let listener = UnixListener::bind(socket_path)?;
     tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await?;
     let backend = Arc::new(Mutex::new(backend));
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
-        let (stream, _) = listener.accept().await?;
-        let backend = Arc::clone(&backend);
-        tokio::spawn(async move {
-            let _ = handle_connection(stream, backend).await;
-        });
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let backend = Arc::clone(&backend);
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, backend).await;
+                });
+            }
+            interrupted = tokio::signal::ctrl_c() => {
+                interrupted?;
+                break;
+            }
+            terminated = terminate.recv() => {
+                if terminated.is_some() {
+                    break;
+                }
+            }
+        }
     }
+    if tokio::fs::try_exists(socket_path).await? {
+        tokio::fs::remove_file(socket_path).await?;
+    }
+    Ok(())
 }
 
 async fn handle_connection(stream: UnixStream, backend: Arc<Mutex<QemuBackend>>) -> IpcResult<()> {

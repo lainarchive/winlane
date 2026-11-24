@@ -100,3 +100,38 @@ async fn unix_control_serializes_concurrent_clients() {
         .expect("stop over ipc");
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_control_socket_file_is_replaced() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let socket_path = root.path().join("control.sock");
+    std::fs::write(&socket_path, b"stale").expect("write stale socket");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix_control(server_socket, backend).await });
+
+    let mut connected = false;
+    for _ in 0..100 {
+        let result = UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Status {
+                machine: MachineHandle {
+                    id: "missing".to_string(),
+                    name: "missing".to_string(),
+                    state_dir: root.path().to_string_lossy().into_owned(),
+                    backend: "qemu".to_string(),
+                    state: winlane_contracts::MachineState::Defined,
+                },
+            })
+            .await;
+        if matches!(result, Err(winlane_ipc::IpcError::Protocol(_))) {
+            connected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(connected);
+    server.abort();
+}
