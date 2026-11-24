@@ -1,21 +1,13 @@
-//! QEMU machine lifecycle, QMP control, frames, input, checkpoints.
+//! QEMU machine lifecycle, QMP control, frames, input, and checkpoints.
 
-use thiserror::Error;
+mod error;
+mod qemu;
+mod qmp;
 
-#[derive(Debug, Error)]
-pub enum WinlaneCoreError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
-}
+pub use error::{CoreError, CoreResult};
+pub use qemu::{FrameDimensions, QemuBackend};
+pub use qmp::{QmpClient, QmpError, QmpEvent};
 
 pub fn implementation_status() -> &'static str {
-    "scaffold-only"
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn reports_scaffold_status() {
-        assert_eq!(super::implementation_status(), "scaffold-only");
-    }
+    "qemu-control-plane"
 }
