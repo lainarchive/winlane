@@ -48,7 +48,9 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
 - MCP evidence sequences stayed contiguous, redacted sensitive process arguments and typed text, and content-addressed large output blobs
 - two concurrent Windows machines reached guest-agent readiness, captured frames, survived daemon SIGTERM cleanup without recovery boots, restarted cleanly, and were destroyed with no QEMU, swtpm, daemon, or MCP processes left
-- the committed demo harness completed a real 144-second Windows recording; post-restore ValuePattern text matched `before checkpoint` exactly, and evidence, cleanup, and golden-image integrity passed
+- exact Kitty rendering was visually validated under official kitty 0.51.1/Xvfb: the Windows desktop kept the correct aspect ratio, text was plainly readable in a full-height pane, zoom/pan geometry stayed consistent, and terminal click inverse mapping reached the intended guest pixel exactly
+- release live-view capture pacing reached 5.00 captures/s in idle and visibly changing Windows sessions at the default `--fps 5`
+- the committed demo harness completed a real 145.234-second Windows recording on the exact integrated build; initial capture started only after interactive desktop readiness, Notepad first-run popup dismissal was verified absent, post-restore ValuePattern text matched `before checkpoint` exactly, and evidence, cleanup, and golden-image integrity passed
 - raw-view UI Automation exposed the legacy Run dialog field that the control view did not; raw-path set-text and correct-runtime-id invoke both succeeded on real Windows
 - wrong-runtime-id semantic input failed before changing UI state; path-only input remained compatible
 - the ASCII keyboard matrix matched in Notepad for uppercase, lowercase, digits, space, shifted punctuation, tab, and Enter after accounting for Windows line endings; `ctrl+a` replacement matched exactly and unsupported Unicode was rejected before typing
@@ -57,7 +59,8 @@ Not yet proven end-to-end:
 
 - hardware keyboard input is limited to printable ASCII plus newline and tab, paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
-- terminal input behavior across a matrix of real terminal emulators
+- terminal input behavior across a matrix of real terminal emulators beyond the validated kitty/Xvfb path
+- live-view throughput above the validated 5 captures/s default
 - long-running stability and broader concurrent machine use
 
 Running checkpoints include RAM and can be several GiB. Clones collapse the backing chain into independent qcow2 images so the source can keep changing or be destroyed safely; cloning a large Windows disk can take real time and disk space. Clones receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
