@@ -173,6 +173,75 @@ async fn failed_create_and_clone_remove_partial_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_checkpoint_removes_partial_state() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("checkpointcleanup"))
+        .await
+        .expect("create machine");
+    std::fs::remove_file(root.path().join("checkpointcleanup/disk.qcow2"))
+        .expect("remove disk to force checkpoint failure");
+
+    assert!(
+        backend
+            .checkpoint_machine(&machine, "will_fail")
+            .await
+            .is_err()
+    );
+    let checkpoint_root = root.path().join("checkpointcleanup/checkpoints");
+    if checkpoint_root.exists() {
+        assert_eq!(
+            std::fs::read_dir(&checkpoint_root)
+                .expect("read checkpoint root")
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn externally_adopted_machine_restore_is_rejected_and_stop_waits() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("externalstop"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let checkpoint = backend
+        .checkpoint_machine(&machine, "running")
+        .await
+        .expect("running checkpoint");
+
+    let mut external = QemuBackend::new(root.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    assert!(external.restore_checkpoint(&checkpoint).await.is_err());
+    external
+        .stop_machine(&machine)
+        .await
+        .expect("stop externally adopted machine");
+    assert_eq!(
+        external
+            .status_machine(&machine)
+            .await
+            .expect("external stopped status"),
+        MachineState::Stopped
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_fake_machines_run_and_clean_up_independently() {
     let root = tempfile::tempdir().expect("temporary machine root");
     let mut backend = QemuBackend::new(root.path())
