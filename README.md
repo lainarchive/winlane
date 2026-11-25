@@ -176,7 +176,7 @@ cargo run -p winlane-cli -- mcp \
 
 The hardware-plane MCP tools cover machine lifecycle, screenshots, input, scrolling, and checkpoints. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
 
-Semantic guest MCP tools are being wired separately; do not treat them as available until they appear in `tools/list` on the integration branch.
+Semantic guest MCP tools are implemented for UI tree, invoke, set-text, process execution, and file transfer. They appear in `tools/list`, but the MCP path has not yet been validated against a live Windows guest; use the guest CLI for the validated path until that proof lands.
 
 ## Stop the machine
 
