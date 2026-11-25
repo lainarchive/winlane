@@ -127,6 +127,8 @@ pub struct FrameRef {
 pub struct UiNodeRef {
     pub id: String,
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
     pub automation_id: Option<String>,
     pub control_type: Option<String>,
     pub bounds: Option<[i32; 4]>,

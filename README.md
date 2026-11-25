@@ -174,7 +174,7 @@ cargo run -p winlane-cli -- guest ui-tree \
   --max-nodes 2000
 ```
 
-The tree output states its `view`. UI operations default to `--view control`; pass `--view raw` to `ui-tree` to use the raw UI Automation walker. When invoking or setting text on a node path, pass the same view used to read the tree that produced the path. Raw-view support is implemented in the helper and interfaces but is not live-validated yet.
+The tree output states its `view`. UI operations default to `--view control`; pass `--view raw` to `ui-tree` to use the raw UI Automation walker. When invoking or setting text on a node path, pass the same view used to read the tree that produced the path. Also pass that node's `runtimeId` as `--runtime-id` when available; invoke and set-text then fail if the resolved path now points at an element with a different or unavailable runtime id. Path-only calls remain accepted for compatibility but are not identity-checked. Runtime-id verification is implemented but not live-validated yet.
 
 Invoke an element from the current tree:
 
@@ -217,7 +217,7 @@ cargo run -p winlane-cli -- mcp \
 
 The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string; names are resolved through the control daemon on each call. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text. If a tool operation succeeds but evidence recording fails, the MCP result stays successful and carries an explicit `evidence_error` field instead of misreporting the machine operation as failed.
 
-Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node. The semantic tools accept `view` as `control` (default) or `raw`; use the same view for the tree and for invoke/set-text paths derived from it. Raw-view support is implemented but not live-validated.
+Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node. The semantic tools accept `view` as `control` (default) or `raw`; use the same view for the tree and for invoke/set-text paths derived from it. Pass `runtime_id` from the same fresh tree when available; without it, path-only invoke/set-text is not identity-checked. Raw-view and runtime-id verification are implemented but not live-validated.
 
 Export or inspect evidence. Export writes `events.jsonl` plus the content-addressed `blobs/` directory:
 

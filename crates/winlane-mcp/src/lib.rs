@@ -14,7 +14,7 @@ use winlane_contracts::{
     NetworkMode, ScrollDirection, UiNodeRef,
 };
 use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
-use winlane_guest::uia::{BlockingUiaControl, UiaResult, UiaView};
+use winlane_guest::uia::{BlockingUiaControl, UiaResult, UiaView, is_valid_runtime_id};
 use winlane_ipc::{ControlRequest, IpcError, UnixControlClient};
 
 pub type McpResult<T> = Result<T, McpError>;
@@ -318,8 +318,16 @@ impl McpControlPlane {
         let machine = self.machine_input(input).await?;
         let node = required_string(input, "node")?;
         let view = uia_view_input(input)?;
-        self.semantic(machine, SemanticOperation::Invoke { node, view })
-            .await
+        let runtime_id = runtime_id_input(input)?;
+        self.semantic(
+            machine,
+            SemanticOperation::Invoke {
+                node,
+                view,
+                runtime_id,
+            },
+        )
+        .await
     }
 
     pub async fn ui_set_text(&self, input: &Value) -> McpResult<Value> {
@@ -327,8 +335,17 @@ impl McpControlPlane {
         let node = required_string(input, "node")?;
         let text = required_string(input, "text")?;
         let view = uia_view_input(input)?;
-        self.semantic(machine, SemanticOperation::SetText { node, text, view })
-            .await
+        let runtime_id = runtime_id_input(input)?;
+        self.semantic(
+            machine,
+            SemanticOperation::SetText {
+                node,
+                text,
+                view,
+                runtime_id,
+            },
+        )
+        .await
     }
 
     pub async fn process_run(&self, input: &Value) -> McpResult<Value> {
@@ -409,11 +426,13 @@ enum SemanticOperation {
     Invoke {
         node: String,
         view: UiaView,
+        runtime_id: Option<String>,
     },
     SetText {
         node: String,
         text: String,
         view: UiaView,
+        runtime_id: Option<String>,
     },
     Run {
         command: String,
@@ -440,10 +459,17 @@ fn execute_semantic_operation<T: QgaTransport>(
             max_nodes,
             view,
         } => control.ui_tree(max_depth, max_nodes, view),
-        SemanticOperation::Invoke { node, view } => control.invoke(&node_ref(&node), view),
-        SemanticOperation::SetText { node, text, view } => {
-            control.set_text(&node_ref(&node), &text, view)
-        }
+        SemanticOperation::Invoke {
+            node,
+            view,
+            runtime_id,
+        } => control.invoke(&node_ref(&node, runtime_id), view),
+        SemanticOperation::SetText {
+            node,
+            text,
+            view,
+            runtime_id,
+        } => control.set_text(&node_ref(&node, runtime_id), &text, view),
         SemanticOperation::Run {
             command,
             args,
@@ -471,10 +497,11 @@ fn execute_semantic_operation<T: QgaTransport>(
     }
 }
 
-fn node_ref(path: &str) -> UiNodeRef {
+fn node_ref(path: &str, runtime_id: Option<String>) -> UiNodeRef {
     UiNodeRef {
         id: path.to_string(),
         generation: 0,
+        runtime_id,
         automation_id: None,
         control_type: None,
         bounds: None,
@@ -607,6 +634,7 @@ pub fn tool_definitions() -> Value {
             "properties": {
                 "machine": machine_ref,
                 "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
+                "runtime_id": {"type": "string", "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"},
                 "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
             },
             "required": ["machine", "node"]
@@ -617,6 +645,7 @@ pub fn tool_definitions() -> Value {
                 "machine": machine_ref,
                 "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
                 "text": {"type": "string", "maxLength": 4096},
+                "runtime_id": {"type": "string", "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"},
                 "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
             },
             "required": ["machine", "node", "text"]
@@ -650,6 +679,16 @@ pub fn tool_definitions() -> Value {
             "required": ["machine", "guest_path", "host_path"]
         }}
     ])
+}
+
+fn runtime_id_input(input: &Value) -> McpResult<Option<String>> {
+    match optional_string(input, "runtime_id")? {
+        None => Ok(None),
+        Some(value) if is_valid_runtime_id(&value) => Ok(Some(value)),
+        Some(_) => Err(McpError::InvalidInput(
+            "runtime_id must be dot-separated integers".to_string(),
+        )),
+    }
 }
 
 fn uia_view_input(input: &Value) -> McpResult<UiaView> {
@@ -994,6 +1033,13 @@ mod tests {
             )
             .await;
         assert!(matches!(bad_view, Err(McpError::InvalidInput(_))));
+        let bad_runtime_id = mcp
+            .dispatch(
+                "ui_set_text",
+                &json!({"machine": machine_json(), "node": "0", "text": "x", "runtime_id": "7;calc"}),
+            )
+            .await;
+        assert!(matches!(bad_runtime_id, Err(McpError::InvalidInput(_))));
         let bad_args = mcp
             .dispatch(
                 "process_run",

@@ -302,6 +302,7 @@ mod tests {
         UiNodeRef {
             id: "node-1".into(),
             generation: 1,
+            runtime_id: None,
             automation_id: Some("edit".into()),
             control_type: Some("Edit".into()),
             bounds: Some([10, 10, 100, 30]),
