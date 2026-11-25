@@ -159,7 +159,8 @@ run "$winlane_bin" machine start \
 start_view
 run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_name" 120
 
-run python3 "$demo_dir/write_notepad_task_xml.py" "$work_dir/notepad-task.xml"
+run python3 "$demo_dir/write_task_xml.py" "$work_dir/notepad-task.xml" \
+  --command 'C:\Windows\System32\notepad.exe'
 run "$winlane_bin" guest import \
   --machine "$machine_name" \
   --control-socket "$control_socket" \
@@ -208,8 +209,76 @@ run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_nam
 
 tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
 mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$work_dir/ui-tree-restored.json"
-run python3 "$demo_dir/find_notepad_node.py" "$work_dir/ui-tree-restored.json" >/dev/null
-printf 'restored desktop is responsive and Notepad is present; leaving the view visible\n'
+printf '\n$ python3 %q %q\n' "$demo_dir/find_notepad_node.py" "$work_dir/ui-tree-restored.json" >&2
+restored_node_line=$(python3 "$demo_dir/find_notepad_node.py" "$work_dir/ui-tree-restored.json")
+IFS=$'\t' read -r restored_node restored_runtime_id <<<"$restored_node_line"
+if ! valid_node_ref "$restored_node"; then
+  echo "drive-demo error: invalid restored Notepad node path returned: $restored_node" >&2
+  exit 1
+fi
+if ! valid_runtime_id "$restored_runtime_id"; then
+  echo "drive-demo error: invalid restored Notepad runtime id returned: $restored_runtime_id" >&2
+  exit 1
+fi
+
+read_powershell_args="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\winlane-demo-read-uia.ps1 -Path $restored_node -OutputPath C:\\Windows\\Temp\\winlane-demo-read.json"
+if [[ -n $restored_runtime_id ]]; then
+  read_powershell_args="$read_powershell_args -RuntimeId '$restored_runtime_id'"
+fi
+run python3 "$demo_dir/write_task_xml.py" "$work_dir/read-task.xml" \
+  --command 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' \
+  --arguments "$read_powershell_args"
+run "$winlane_bin" guest import \
+  --machine "$machine_name" \
+  --control-socket "$control_socket" \
+  --host-path "$demo_dir/read-uia-text.ps1" \
+  --guest-path 'C:\Windows\Temp\winlane-demo-read-uia.ps1'
+run "$winlane_bin" guest import \
+  --machine "$machine_name" \
+  --control-socket "$control_socket" \
+  --host-path "$work_dir/read-task.xml" \
+  --guest-path 'C:\Windows\Temp\winlane-demo-read-task.xml'
+run "$winlane_bin" guest run \
+  --machine "$machine_name" \
+  --control-socket "$control_socket" \
+  --command 'C:\Windows\System32\schtasks.exe' \
+  --arg /Create \
+  --arg /TN --arg WinlaneDemoReadText \
+  --arg /XML --arg 'C:\Windows\Temp\winlane-demo-read-task.xml' \
+  --arg /F \
+  --timeout-ms 10000
+run "$winlane_bin" guest run \
+  --machine "$machine_name" \
+  --control-socket "$control_socket" \
+  --command 'C:\Windows\System32\schtasks.exe' \
+  --arg /Run \
+  --arg /TN --arg WinlaneDemoReadText \
+  --timeout-ms 10000
+
+printf 'waiting for guest-side UIA text read result\n'
+read_result_ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if "$winlane_bin" guest export \
+    --machine "$machine_name" \
+    --control-socket "$control_socket" \
+    --guest-path 'C:\Windows\Temp\winlane-demo-read.json' \
+    --host-path "$work_dir/uia-read.json" >/dev/null 2>&1; then
+    read_result_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ $read_result_ready -ne 1 ]]; then
+  echo 'drive-demo error: guest-side UIA text read did not produce output' >&2
+  exit 1
+fi
+run "$winlane_bin" guest export \
+  --machine "$machine_name" \
+  --control-socket "$control_socket" \
+  --guest-path 'C:\Windows\Temp\winlane-demo-read.json' \
+  --host-path "$work_dir/uia-read.json"
+run python3 "$demo_dir/verify_uia_text.py" "$work_dir/uia-read.json" 'before checkpoint'
+printf 'restored Notepad text is independently verified; leaving the view visible\n'
 run sleep 7
 
 run "$winlane_bin" machine stop \

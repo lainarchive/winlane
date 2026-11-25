@@ -44,7 +44,7 @@ The recording attaches to one tmux session with two panes:
 - left: `winlane view`, showing the real Windows desktop once the machine starts
 - right: the real CLI/MCP control sequence
 
-The sequence creates and starts a disposable machine, launches Notepad in the interactive session, writes `before checkpoint` through MCP `ui_set_text`, creates an MCP checkpoint, writes `this never happened`, stops/restores/starts because the current backend requires that sequence, verifies that the restored desktop is responsive and Notepad is present, then stops and destroys the machine. Evidence is exported under the output directory.
+The sequence creates and starts a disposable machine, launches Notepad in the interactive session, writes `before checkpoint` through MCP `ui_set_text`, creates an MCP checkpoint, writes `this never happened`, then stops/restores/starts because the current backend requires that sequence. After restore, the harness reads a fresh UI Automation node, runs a guest-side PowerShell reader in the interactive session, exports its JSON result, and requires the Notepad document text from `ValuePattern` or `TextPattern` to be exactly `before checkpoint`. Any mismatch or missing read result fails the demo. It then stops and destroys the machine. Evidence is exported under the output directory.
 
 Outputs:
 
@@ -59,8 +59,8 @@ The cast is recorded with asciinema `--idle-time-limit 2`; long idle waits are c
 
 - Because the view runs inside tmux, the conservative half-block renderer is used even when the outer terminal supports kitty graphics.
 - The golden image must already provision Windows, virtio drivers, QEMU Guest Agent, and the interactive user session used by winlane.
-- Notepad is launched through a temporary Scheduled Task using the `INTERACTIVE` principal. If no interactive session exists, the demo correctly fails.
-- UI Automation paths are read fresh immediately before each write.
+- Notepad and the post-restore text reader run through temporary Scheduled Tasks using the `INTERACTIVE` principal. If no interactive session exists, the demo correctly fails.
+- UI Automation paths are read fresh immediately before each write and before the post-restore text read; the reader also compares `runtimeId` when one is available.
 - Running checkpoints can be large and slow; checkpoint timeout is 300 seconds in each direction.
 - The harness does not install tmux, asciinema, agg, ffmpeg, QEMU, Windows, or driver dependencies.
 - Temporary driver files are removed. The daemon, tmux session, machine, and recording processes are cleaned up on normal failure or interruption; a hard host crash can still leave machine state under the runtime root.
