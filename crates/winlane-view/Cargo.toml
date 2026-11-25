@@ -13,3 +13,7 @@ sha2.workspace = true
 png.workspace = true
 base64.workspace = true
 fast_image_resize.workspace = true
+
+# sha2-asm does not support Windows targets; keep the upstream asm feature target-scoped.
+[target.'cfg(all(not(target_os = "windows"), any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }

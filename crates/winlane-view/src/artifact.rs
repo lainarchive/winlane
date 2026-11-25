@@ -187,6 +187,14 @@ mod tests {
     }
 
     #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
     fn artifact_hash_validation_accepts_matching_hash_and_rejects_mismatch() {
         let bytes = b"P6 1 1 255
 ";
