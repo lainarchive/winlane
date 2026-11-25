@@ -377,7 +377,7 @@ fn finalize_guest_file<T: QgaTransport>(
         "if(Test-Path -LiteralPath $d){exit 3};"
     };
     let script = format!(
-        "$s={staging};$d={target};$backup=$null;{overwrite_check}try{{if(Test-Path -LiteralPath $d){{$backup=$d+'.winlane-backup-'+[System.IO.Path]::GetRandomFileName();[System.IO.File]::Replace($s,$d,$backup);[System.IO.File]::Delete($backup)}}else{{[System.IO.File]::Move($s,$d)}};exit 0}}catch{{if(($null -ne $backup) -and (Test-Path -LiteralPath $backup)){{Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue}};Write-Error $_.Exception.Message;exit 1}}"
+        "$s={staging};$d={target};$backup=$null;{overwrite_check}try{{if(Test-Path -LiteralPath $d){{$backup=$d+'.winlane-backup-'+[System.IO.Path]::GetRandomFileName();[System.IO.File]::Replace($s,$d,$backup);Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue}}else{{[System.IO.File]::Move($s,$d)}};exit 0}}catch{{if(($null -ne $backup) -and (Test-Path -LiteralPath $backup)){{Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue}};Write-Error $_.Exception.Message;exit 1}}"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     if capture.exit_code == Some(0) {
@@ -406,13 +406,14 @@ fn prepare_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}};New-Item -ItemType Directory -Force -Path $staging|Out-Null"
+        "$staging={staging};$target={target};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}};if(Test-Path -LiteralPath $staging){{$item=Get-Item -LiteralPath $staging -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}}}};New-Item -ItemType Directory -Force -Path $staging|Out-Null"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     match capture.exit_code {
         Some(0) => Ok(()),
         Some(3) => Err(UiaError::DestinationExists),
         Some(4) => Err(UiaError::DestinationExists),
+        Some(5) => Err(UiaError::InvalidGuestPath),
         exit_code => Err(UiaError::Helper {
             exit_code,
             message: process_output_summary(&capture),
@@ -436,12 +437,13 @@ fn finalize_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
+        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $backup){{exit 5}};if(Test-Path -LiteralPath $staging){{$item=Get-Item -LiteralPath $staging -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}}}};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{$item=Get-Item -LiteralPath $backup -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
     );
     let capture = run_powershell(control, &script, 60_000)?;
     match capture.exit_code {
         Some(0) => Ok(()),
         Some(3) | Some(4) => Err(UiaError::DestinationExists),
+        Some(5) => Err(UiaError::InvalidGuestPath),
         exit_code => Err(UiaError::Helper {
             exit_code,
             message: process_output_summary(&capture),
@@ -513,7 +515,7 @@ fn cleanup_guest_path<T: QgaTransport>(
     let path = ps_quote(path);
     let recurse = if recurse { " -Recurse" } else { "" };
     let script = format!(
-        "if(Test-Path -LiteralPath {path}){{Remove-Item -LiteralPath {path} -Force{recurse} -ErrorAction SilentlyContinue}}"
+        "if(Test-Path -LiteralPath {path}){{$item=Get-Item -LiteralPath {path} -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0){{Remove-Item -LiteralPath {path} -Force{recurse} -ErrorAction SilentlyContinue}}}}"
     );
     let _ = run_powershell(control, &script, 10_000);
 }
@@ -553,9 +555,51 @@ fn validate_guest_transfer_path(path: &str, workspace: bool) -> UiaResult<()> {
         .split(['\\', '/'])
         .any(|component| matches!(component, ".." | "."));
     let trailing_separator = path.len() > 3 && path.ends_with(['\\', '/']);
+    let windows_component_invalid =
+        path.split(['\\', '/'])
+            .enumerate()
+            .any(|(index, component)| {
+                let drive_component = index == 0
+                    && component.len() == 2
+                    && component.as_bytes()[0].is_ascii_alphabetic()
+                    && component.as_bytes()[1] == b':';
+                let stem = component
+                    .split('.')
+                    .next()
+                    .unwrap_or(component)
+                    .to_ascii_uppercase();
+                component.ends_with(['.', ' '])
+                    || (component.contains(':') && !drive_component)
+                    || matches!(
+                        stem.as_str(),
+                        "CON"
+                            | "PRN"
+                            | "AUX"
+                            | "NUL"
+                            | "COM1"
+                            | "COM2"
+                            | "COM3"
+                            | "COM4"
+                            | "COM5"
+                            | "COM6"
+                            | "COM7"
+                            | "COM8"
+                            | "COM9"
+                            | "LPT1"
+                            | "LPT2"
+                            | "LPT3"
+                            | "LPT4"
+                            | "LPT5"
+                            | "LPT6"
+                            | "LPT7"
+                            | "LPT8"
+                            | "LPT9"
+                    )
+            });
     if device
         || traversal
         || trailing_separator
+        || windows_component_invalid
         || path.len() > 1024
         || !valid_absolute_windows_path(path)
     {
@@ -2036,6 +2080,11 @@ mod tests {
             "if(Test-Path -LiteralPath $target){$item=Get-Item -LiteralPath $target -Force"
         ));
         assert!(source.contains("New-Item -ItemType Directory -Force -Path $staging"));
+        assert!(source.contains("[System.IO.FileAttributes]::ReparsePoint"));
+        assert!(
+            source
+                .contains("Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue")
+        );
     }
 
     #[test]
@@ -2051,6 +2100,16 @@ mod tests {
         }
         assert!(validate_guest_transfer_path(r"\\host\share\workspace", true).is_err());
         assert!(validate_guest_transfer_path(r"C:\", true).is_err());
+        for path in [
+            r"C:\workspace\name.",
+            r"C:\workspace\name ",
+            r"C:\workspace\CON",
+            r"C:\workspace\com1.txt",
+            r"C:\workspace\file.txt:stream",
+        ] {
+            assert!(validate_guest_transfer_path(path, false).is_err());
+        }
+        assert!(validate_guest_transfer_path(r"C:\workspace\unicodé-[x]'", false).is_ok());
     }
 
     #[test]
