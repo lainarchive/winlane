@@ -48,6 +48,7 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
 - MCP evidence sequences stayed contiguous, redacted sensitive process arguments and typed text, and content-addressed large output blobs
 - two concurrent Windows machines reached guest-agent readiness, captured frames, survived daemon SIGTERM cleanup without recovery boots, restarted cleanly, and were destroyed with no QEMU, swtpm, daemon, or MCP processes left
+- the committed demo harness completed a real 144-second Windows recording; post-restore ValuePattern text matched `before checkpoint` exactly, and evidence, cleanup, and golden-image integrity passed
 - raw-view UI Automation exposed the legacy Run dialog field that the control view did not; raw-path set-text and correct-runtime-id invoke both succeeded on real Windows
 - wrong-runtime-id semantic input failed before changing UI state; path-only input remained compatible
 - the ASCII keyboard matrix matched in Notepad for uppercase, lowercase, digits, space, shifted punctuation, tab, and Enter after accounting for Windows line endings; `ctrl+a` replacement matched exactly and unsupported Unicode was rejected before typing
