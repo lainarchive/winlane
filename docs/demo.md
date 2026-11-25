@@ -54,12 +54,14 @@ Xvfb creates a bare 1920x1080 display. One kitty OS window fills that display, s
 
 The driver signals the supervisor through a small state file. The supervisor starts or restarts `winlane view` after the initial machine start and after the stop/restore/start sequence. `winlane view` is not inside tmux, so terminal detection can use the Kitty graphics path.
 
-The sequence creates and starts a disposable machine, launches Notepad in the interactive session, writes `before checkpoint` through MCP `ui_set_text`, creates an MCP checkpoint, writes `this never happened`, then stops/restores/starts because the current backend requires that sequence. After restore, the harness reads a fresh UI Automation node, runs a guest-side PowerShell reader in the interactive session, exports its JSON result, and requires the Notepad document text from `ValuePattern` or `TextPattern` to be exactly `before checkpoint`. Any mismatch or missing read result fails the demo. It then stops and destroys the machine. Evidence is exported under the output directory.
+ffmpeg starts only after the driver proves interactive desktop/UIA readiness. The boot sequence and initial machine setup are therefore not presented as part of the recorded action sequence. The terminal scrollback visible when recording starts can still contain prior create/start/probe output, which is intentional evidence of that setup rather than a claim that boot pixels were captured.
+
+The sequence creates and starts a disposable machine, launches Notepad in the interactive session, dismisses and verifies absence of the Notepad first-run popup when present, writes `before checkpoint` through MCP `ui_set_text`, creates an MCP checkpoint, writes `this never happened`, then stops/restores/starts because the current backend requires that sequence. After restore, the harness reads a fresh UI Automation node, runs a guest-side PowerShell reader in the interactive session, exports its JSON result, and requires the Notepad document text from `ValuePattern` or `TextPattern` to be exactly `before checkpoint`. Any mismatch or missing read result fails the demo. It then stops and destroys the machine. Evidence is exported under the output directory.
 
 Outputs:
 
 - `winlane-demo-x11.mp4` — real-time 1920x1080 H.264 x11grab capture; no time compression, speedup, or fabricated terminal output
-- `capture-info.json` — MP4 dimensions/duration/codec/SHA-256, kitty version/path, display number, crop/time-compression declarations, and driver exit status
+- `capture-info.json` — MP4 dimensions/duration/codec/SHA-256, kitty version/path, display number, crop/time-compression declarations, explicit post-readiness recording disclosure, and driver exit status
 - `driver.log` and `driver-status` — real driver output and exit status
 - `ffmpeg.log`, `kitty.log`, `xvfb.log`, and `daemon.log`
 - `evidence-export/`

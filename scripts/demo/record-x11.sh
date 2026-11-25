@@ -460,6 +460,8 @@ info = {
         "time_compression": False,
         "crop": None,
         "crop_reason": "kitty occupies the complete bare Xvfb root window at capture size",
+        "start_after_interactive_readiness": True,
+        "start_disclosure": "ffmpeg starts only after the driver proves interactive desktop/UIA readiness; initial boot is not presented as part of the recorded action sequence",
     },
     "terminal": {
         "kitty_bin": kitty_bin,
