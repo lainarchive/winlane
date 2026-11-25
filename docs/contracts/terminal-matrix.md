@@ -104,6 +104,19 @@ The recorded debug-binary run on Ubuntu 22.04 passed with these results:
 
 This is synthetic fake-control validation in kitty only. It does not validate Windows/QEMU input delivery, OS clipboard integration, Ghostty, WezTerm, other kitty versions, or terminal input under tmux.
 
+## Live-view long-running stability soak
+
+`scripts/soak-live-view.py` runs the release live viewer in real kitty 0.51.1 under Xvfb at the supported default 5 fps against deterministic whole-changing synthetic frames. It measures capture continuity, viewer and kitty process-tree CPU/RSS/file descriptors, terminal writes, end-of-run visible correctness, and double-Ctrl-Q detach. At 40% and 70% of the run it disturbs the viewer with an OS-window resize and kitty font zoom.
+
+```sh
+cargo build --release -p winlane-cli
+python3 scripts/soak-live-view.py --duration 600 --output-dir /tmp/winlane-live-soak
+```
+
+The recorded ten-minute run on this Ubuntu 22.04 VM lasted 600.375 seconds and completed 3,000 captures at 4.997 captures/s, a 1.87-capture deficit from ideal 5 fps cadence. Average CPU was 18.67% for the viewer process and 55.35% for the kitty process tree. Viewer RSS moved from 12,984 KiB to 13,000 KiB (+16 KiB; 20,104 KiB maximum sampled); kitty process-tree RSS moved from 276,620 KiB to 256,244 KiB (-20,376 KiB; 283,212 KiB maximum sampled). Viewer file descriptors were 12 at the first and final periodic samples, with a maximum of 13; the final instantaneous sample observed 13 because a capture/control resource can be transiently open. Kitty process-tree file descriptors moved from 49 to 44, maximum 49. The viewer wrote 278,483,745 terminal bytes (265.583 MiB) in 3,001 writes. After the resize and font-zoom disturbances, the final X11 screenshot still contained 32,007 exact recent-frame color pixels. One Ctrl+Q did not detach; the second consecutive Ctrl+Q detached cleanly.
+
+This soak reproduced no monotonic viewer RSS growth, file-descriptor leak, visible corruption, capture stall, or detach failure, so no production fix was justified. It is still a bounded ten-minute synthetic fake-control soak in kitty only: it does not prove multi-hour stability, Windows/QEMU behavior, Ghostty/WezTerm behavior, concurrent machines, tmux, or real guest capture cost. The fake capture service averaged 9.627 ms per capture, so real guest-backed behavior may differ.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
