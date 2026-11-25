@@ -65,7 +65,7 @@ fn encode_png_rgb_bytes(rgb: &[u8], width: u32, height: u32) -> ViewResult<Vec<u
         let mut encoder = png::Encoder::new(&mut encoded, width, height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
+        encoder.set_compression(png::Compression::Balanced);
         let mut writer = encoder.write_header()?;
         writer.write_image_data(rgb)?;
     }
@@ -216,8 +216,7 @@ mod tests {
 
     #[test]
     fn chunks_large_payloads_with_empty_final_chunk() {
-        let frame = solid_frame(512, 512);
-        let png = encode_png_rgb(&frame).unwrap();
+        let png = vec![7_u8; 4097];
         let encoded = encode_kitty_png(
             &png,
             KittyPlacement {

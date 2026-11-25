@@ -34,6 +34,30 @@ The validation run recorded in this branch used kitty 0.51.1 and the debug `winl
 
 This is control-plane/rendering validation with synthetic local frame artifacts, not a real Windows guest proof. No Windows/QEMU validation is claimed for this optimization.
 
+## Live-view throughput benchmark and compression choice
+
+`scripts/benchmark-live-view.py` is the reproducible capture-to-terminal-write harness. It serves deterministic 1024x768 binary PPM frame artifacts through a fake Unix control plane, runs the release `winlane view` binary in a pseudo-terminal with Kitty protocol detection enabled, and measures achieved capture rate, terminal bytes, viewer CPU/RSS, and fake capture service time at requested 5, 15, and 30 fps. Its terminal consumer is a fast pseudo-terminal capture, so it isolates viewer generation/write cost rather than measuring a real terminal emulator's image decode cost.
+
+```sh
+cargo build --release --workspace
+python3 scripts/benchmark-live-view.py --output-dir /tmp/winlane-live-benchmark
+```
+
+`crates/winlane-view/examples/render_benchmark.rs` separates the main renderer costs for the same style of 1024x768 frame scaled into an 80x24 terminal:
+
+```sh
+cargo build --release -p winlane-view --example render_benchmark
+target/release/examples/render_benchmark
+```
+
+On this Ubuntu 22.04 VM, the synthetic whole-frame-changing workload reached the requested rate even before the compression change: 29.802 captures/s at 30 fps while writing 178,929 terminal bytes/capture (5.085 MiB/s). Unchanged frames and zoom-200 outside-crop changes also reached 29.414-29.779 captures/s with zero post-warmup repaint bytes, confirming that suppression rather than terminal output is the cost driver in those cases. Inside-crop changing frames reached 28.989 captures/s while writing 70,998 bytes/capture (1.963 MiB/s). The 5 fps default is therefore a conservative default rather than a renderer-imposed ceiling in this synthetic path; requested 15 and 30 fps were reached with the fast consumer.
+
+The component profile showed why terminal bytes were the safest bottleneck to attack: scaling the frame cost about 1.64 ms, exact-size Kitty rendering with the prior fast PNG mode cost about 1.59 ms, SHA-256 artifact validation cost about 5.30 ms for the 2.36 MB PPM, and the prior fast PNG encode cost about 1.14 ms but produced 156,427 PNG bytes for the exact-size synthetic image. `Compression::Fastest` was faster at about 0.59 ms but increased output to 199,929 bytes, the wrong tradeoff for a terminal stream. `Compression::Balanced` cost about 7.09 ms but reduced the same PNG to 20,896 bytes.
+
+The renderer now uses PNG balanced compression. In the post-change end-to-end harness, the whole-frame-changing 30 fps case still reached 29.815 captures/s while terminal output fell from 178,929 to 42,938 bytes/capture (5.085 to 1.221 MiB/s, about 4.2x lower). The inside-crop 30 fps case reached 29.388 captures/s while output fell from 70,998 to 10,818 bytes/capture (1.963 to 0.303 MiB/s, about 6.5x lower). Unchanged and outside-crop suppressed cases still emitted zero post-warmup repaint bytes and reached 29.797-29.802 captures/s. Maximum sampled viewer CPU in the whole-frame 30 fps case rose from 49.7% to 59.9%, the deliberate CPU-for-bandwidth tradeoff; the lossless PNG pixels and render geometry are unchanged.
+
+This benchmark uses synthetic local frame artifacts and a fast pseudo-terminal consumer. It does not claim Windows guest validation or real terminal-emulator decode throughput; real Kitty correctness remains covered by `scripts/validate-cropped-repaint.py` and the terminal matrix above.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
