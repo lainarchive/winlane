@@ -7,7 +7,7 @@ use winlane_core::QemuBackend;
 use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 
 use crate::CliResult;
-use crate::args::{CreateArgs, DaemonArgs, MachineArgs, MachineCommand, McpArgs};
+use crate::args::{CloneArgs, CreateArgs, DaemonArgs, MachineArgs, MachineCommand, McpArgs};
 
 pub async fn run_daemon(args: DaemonArgs) -> CliResult<()> {
     let backend = QemuBackend::new(args.root).await?;
@@ -56,6 +56,19 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
                 machine: machine_handle(args)?,
             },
         )),
+        MachineCommand::Clone(args) => Ok((
+            args.control_socket.clone(),
+            ControlRequest::CloneMachine {
+                machine: clone_machine_handle(args)?,
+                name: clone_name(args)?,
+            },
+        )),
+        MachineCommand::Destroy(args) => Ok((
+            args.control_socket.clone(),
+            ControlRequest::Destroy {
+                machine: machine_handle(args)?,
+            },
+        )),
     }
 }
 
@@ -77,6 +90,26 @@ fn machine_spec(args: &CreateArgs) -> MachineSpec {
 
 fn machine_handle(args: &MachineArgs) -> CliResult<MachineHandle> {
     Ok(serde_json::from_str(&args.machine_json)?)
+}
+
+fn clone_machine_handle(args: &CloneArgs) -> CliResult<MachineHandle> {
+    Ok(serde_json::from_str(&args.machine_json)?)
+}
+
+fn clone_name(args: &CloneArgs) -> CliResult<String> {
+    if args.name.is_empty()
+        || args.name.len() > 48
+        || !args
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err(crate::CliError::Usage(
+            "clone name must be 1..=48 ASCII alphanumeric, dash, or underscore characters"
+                .to_string(),
+        ));
+    }
+    Ok(args.name.clone())
 }
 
 pub(crate) fn write_json_line(output: &mut impl Write, value: &Value) -> CliResult<()> {
@@ -197,5 +230,37 @@ mod tests {
         let mut output = Vec::new();
         write_json_line(&mut output, &json!({"ok":true})).unwrap();
         assert_eq!(output, b"{\"ok\":true}\n");
+    }
+    #[test]
+    fn clone_destroy_requests_use_exact_ipc_operations() {
+        let machine = machine_args();
+        let clone = super::CloneArgs {
+            control_socket: machine.control_socket.clone(),
+            machine_json: machine.machine_json.clone(),
+            name: "copy-1".to_string(),
+        };
+        let (_socket, request) = machine_request(&MachineCommand::Clone(clone)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "clone_machine");
+        assert_eq!(encoded["name"], "copy-1");
+        assert_eq!(encoded["machine"]["id"], "machine-1");
+
+        let (_socket, request) = machine_request(&MachineCommand::Destroy(machine)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "destroy");
+        assert_eq!(encoded["machine"]["id"], "machine-1");
+    }
+
+    #[test]
+    fn invalid_clone_name_is_rejected_before_ipc() {
+        let machine = machine_args();
+        for name in ["", "bad/name", "bad.name"] {
+            let clone = super::CloneArgs {
+                control_socket: machine.control_socket.clone(),
+                machine_json: machine.machine_json.clone(),
+                name: name.to_string(),
+            };
+            assert!(machine_request(&MachineCommand::Clone(clone)).is_err());
+        }
     }
 }

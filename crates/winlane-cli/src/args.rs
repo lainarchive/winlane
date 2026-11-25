@@ -5,13 +5,19 @@ use winlane_contracts::{BootMode, NetworkMode};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine start|stop|status --control-socket PATH --machine-json JSON\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine start|stop|status --control-socket PATH --machine-json JSON\n       winlane machine clone --control-socket PATH --machine-json JSON --name NAME\n       winlane machine destroy --control-socket PATH --machine-json JSON\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
 pub const MACHINE_ACTION_USAGE: &str =
-    "usage: winlane machine start|stop|status --control-socket PATH --machine-json JSON";
+    "usage: winlane machine start|stop|status|destroy --control-socket PATH --machine-json JSON";
+pub const MACHINE_CLONE_USAGE: &str =
+    "usage: winlane machine clone --control-socket PATH --machine-json JSON --name NAME";
 pub const MCP_USAGE: &str = "usage: winlane mcp --control-socket PATH [--evidence-dir PATH]";
+pub const EVIDENCE_EXPORT_USAGE: &str =
+    "usage: winlane evidence export --evidence-dir PATH --output PATH";
+pub const EVIDENCE_TAIL_USAGE: &str =
+    "usage: winlane evidence tail --evidence-dir PATH [--limit N]";
 pub const GUEST_UI_TREE_USAGE: &str =
     "usage: winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]";
 pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke --machine-json JSON --node PATH";
@@ -59,11 +65,20 @@ pub struct MachineArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneArgs {
+    pub control_socket: PathBuf,
+    pub machine_json: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineCommand {
     Create(CreateArgs),
     Start(MachineArgs),
     Stop(MachineArgs),
     Status(MachineArgs),
+    Clone(CloneArgs),
+    Destroy(MachineArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +153,24 @@ impl GuestCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceExportArgs {
+    pub evidence_dir: PathBuf,
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceTailArgs {
+    pub evidence_dir: PathBuf,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvidenceCommand {
+    Export(EvidenceExportArgs),
+    Tail(EvidenceTailArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
     View(ViewArgs),
@@ -145,6 +178,7 @@ pub enum Command {
     Machine(MachineCommand),
     Mcp(McpArgs),
     Guest(GuestCommand),
+    Evidence(EvidenceCommand),
 }
 
 pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
@@ -157,6 +191,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
         "machine" => parse_machine_args(&args[1..]).map(Command::Machine),
         "mcp" => parse_mcp_args(&args[1..]).map(Command::Mcp),
         "guest" => parse_guest_args(&args[1..]).map(Command::Guest),
+        "evidence" => parse_evidence_args(&args[1..]).map(Command::Evidence),
         command => Err(CliError::Usage(format!(
             "unknown command {command}; {USAGE}"
         ))),
@@ -256,6 +291,8 @@ fn parse_machine_args(args: &[String]) -> Result<MachineCommand, CliError> {
         "start" => parse_machine_action_args(&args[1..]).map(MachineCommand::Start),
         "stop" => parse_machine_action_args(&args[1..]).map(MachineCommand::Stop),
         "status" => parse_machine_action_args(&args[1..]).map(MachineCommand::Status),
+        "clone" => parse_machine_clone_args(&args[1..]).map(MachineCommand::Clone),
+        "destroy" => parse_machine_action_args(&args[1..]).map(MachineCommand::Destroy),
         action => Err(CliError::Usage(format!(
             "unknown machine action {action}; {USAGE}"
         ))),
@@ -383,6 +420,62 @@ fn parse_machine_action_args(args: &[String]) -> Result<MachineArgs, CliError> {
         control_socket: required(control_socket, "--control-socket", MACHINE_ACTION_USAGE)?,
         machine_json: required(machine_json, "--machine-json", MACHINE_ACTION_USAGE)?,
     })
+}
+
+fn parse_machine_clone_args(args: &[String]) -> Result<CloneArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        MACHINE_CLONE_USAGE,
+        &["--control-socket", "--machine-json", "--name"],
+    )?;
+    Ok(CloneArgs {
+        control_socket: PathBuf::from(options.required("--control-socket", MACHINE_CLONE_USAGE)?),
+        machine_json: options
+            .required("--machine-json", MACHINE_CLONE_USAGE)?
+            .to_string(),
+        name: options.required("--name", MACHINE_CLONE_USAGE)?.to_string(),
+    })
+}
+
+fn parse_evidence_args(args: &[String]) -> Result<EvidenceCommand, CliError> {
+    let Some(action) = args.first() else {
+        return Err(CliError::Usage(format!("missing evidence action; {USAGE}")));
+    };
+    match action.as_str() {
+        "export" => {
+            let options = ParsedOptions::parse(
+                &args[1..],
+                EVIDENCE_EXPORT_USAGE,
+                &["--evidence-dir", "--output"],
+            )?;
+            Ok(EvidenceCommand::Export(EvidenceExportArgs {
+                evidence_dir: PathBuf::from(
+                    options.required("--evidence-dir", EVIDENCE_EXPORT_USAGE)?,
+                ),
+                output: PathBuf::from(options.required("--output", EVIDENCE_EXPORT_USAGE)?),
+            }))
+        }
+        "tail" => {
+            let options = ParsedOptions::parse(
+                &args[1..],
+                EVIDENCE_TAIL_USAGE,
+                &["--evidence-dir", "--limit"],
+            )?;
+            let limit = match options.one("--limit", EVIDENCE_TAIL_USAGE)? {
+                Some(value) => parse_bounded(value, "limit", 1, 1000, EVIDENCE_TAIL_USAGE)?,
+                None => 20,
+            };
+            Ok(EvidenceCommand::Tail(EvidenceTailArgs {
+                evidence_dir: PathBuf::from(
+                    options.required("--evidence-dir", EVIDENCE_TAIL_USAGE)?,
+                ),
+                limit,
+            }))
+        }
+        action => Err(CliError::Usage(format!(
+            "unknown evidence action {action}; {USAGE}"
+        ))),
+    }
 }
 
 fn parse_mcp_args(args: &[String]) -> Result<McpArgs, CliError> {
@@ -553,9 +646,7 @@ impl<'a> ParsedOptions<'a> {
         while index < args.len() {
             let flag = args[index].as_str();
             if !value_flags.contains(&flag) {
-                return Err(CliError::Usage(format!(
-                    "unknown guest flag {flag}; {usage}"
-                )));
+                return Err(CliError::Usage(format!("unknown flag {flag}; {usage}")));
             }
             index += 1;
             let value = args
@@ -948,5 +1039,82 @@ mod tests {
             "600001".to_string(),
         ]);
         assert!(matches!(timeout, Err(CliError::Usage(_))));
+    }
+    #[test]
+    fn machine_clone_destroy_and_evidence_commands_parse() {
+        let machine = vec![
+            "machine".to_string(),
+            "clone".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--name".to_string(),
+            "copy-1".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&machine).unwrap(),
+            Command::Machine(MachineCommand::Clone(CloneArgs {
+                control_socket: PathBuf::from("/tmp/control.sock"),
+                machine_json: "{}".to_string(),
+                name: "copy-1".to_string(),
+            }))
+        );
+        let destroy = parse_args(&[
+            "machine".to_string(),
+            "destroy".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            destroy,
+            Command::Machine(MachineCommand::Destroy(_))
+        ));
+
+        let tail = parse_args(&[
+            "evidence".to_string(),
+            "tail".to_string(),
+            "--evidence-dir".to_string(),
+            "/tmp/evidence".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            tail,
+            Command::Evidence(EvidenceCommand::Tail(EvidenceTailArgs {
+                evidence_dir: PathBuf::from("/tmp/evidence"),
+                limit: 20,
+            }))
+        );
+        let export = parse_args(&[
+            "evidence".to_string(),
+            "export".to_string(),
+            "--evidence-dir".to_string(),
+            "/tmp/evidence".to_string(),
+            "--output".to_string(),
+            "/tmp/events.jsonl".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            export,
+            Command::Evidence(EvidenceCommand::Export(_))
+        ));
+    }
+
+    #[test]
+    fn evidence_tail_limit_is_bounded() {
+        for limit in ["0", "1001", "x"] {
+            let result = parse_args(&[
+                "evidence".to_string(),
+                "tail".to_string(),
+                "--evidence-dir".to_string(),
+                "/tmp/evidence".to_string(),
+                "--limit".to_string(),
+                limit.to_string(),
+            ]);
+            assert!(matches!(result, Err(CliError::Usage(_))));
+        }
     }
 }
