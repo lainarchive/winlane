@@ -130,8 +130,8 @@ start_view() {
         next_request=$((current_request + 1))
       fi
     fi
-    printf '%s\n' "$next_request" >"$counter_file"
-    printf '%s\n' "$next_request" >"$view_state"
+    atomic_write "$counter_file" "$next_request"
+    atomic_write "$view_state" "$next_request"
     printf 'requested external winlane view restart (request %s)\n' "$next_request"
     return 0
   fi
