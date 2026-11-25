@@ -286,10 +286,15 @@ impl QemuBackend {
 
     pub async fn start_machine(&mut self, machine: &MachineHandle) -> CoreResult<()> {
         let mut record = self.load_record(machine).await?;
-        if self.running.contains_key(&record.handle.id) {
+        let state = self.status_machine(&record.handle).await?;
+        if matches!(state, MachineState::Running | MachineState::Paused) {
             return Err(CoreError::InvalidState {
                 machine: record.handle.name,
-                actual: "running",
+                actual: if matches!(state, MachineState::Running) {
+                    "running"
+                } else {
+                    "paused"
+                },
                 expected: "stopped",
             });
         }
@@ -376,6 +381,12 @@ impl QemuBackend {
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => {
                     let _ = qmp.execute("quit", None).await;
+                    if !wait_for_external_qmp_exit(&record.qmp_socket_path).await? {
+                        return Err(CoreError::Qemu(format!(
+                            "qemu process for machine '{}' did not exit after qmp quit",
+                            record.handle.name
+                        )));
+                    }
                 }
                 Err(_) => {
                     record.handle.state = MachineState::Stopped;
@@ -569,20 +580,45 @@ impl QemuBackend {
         label: &str,
     ) -> CoreResult<CheckpointRef> {
         validate_checkpoint_label(label)?;
-        let mut record = self.load_record(machine).await?;
+        let record = self.load_record(machine).await?;
+        let state_dir = PathBuf::from(&record.handle.state_dir);
         let checkpoint_id = format!("checkpoint-{}", Uuid::new_v4().simple());
-        let checkpoint_dir = PathBuf::from(&record.handle.state_dir)
-            .join(CHECKPOINT_DIR)
-            .join(&checkpoint_id);
+        let checkpoint_dir = state_dir.join(CHECKPOINT_DIR).join(&checkpoint_id);
         tokio::fs::create_dir_all(&checkpoint_dir)
             .await
             .map_err(CoreError::io(
                 "create checkpoint directory",
                 &checkpoint_dir,
             ))?;
+        let result = self
+            .checkpoint_machine_inner(machine, label, &checkpoint_id, &checkpoint_dir, record)
+            .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_dir_all(&checkpoint_dir).await;
+        }
+        result
+    }
 
-        let running = matches!(self.status_machine(machine).await?, MachineState::Running);
-        let vm_state_included = if running {
+    async fn checkpoint_machine_inner(
+        &mut self,
+        machine: &MachineHandle,
+        label: &str,
+        checkpoint_id: &str,
+        checkpoint_dir: &Path,
+        mut record: MachineRecord,
+    ) -> CoreResult<CheckpointRef> {
+        let vm_state_included = match self.status_machine(machine).await? {
+            MachineState::Running => true,
+            MachineState::Paused => {
+                return Err(CoreError::InvalidState {
+                    machine: record.handle.name.clone(),
+                    actual: "paused",
+                    expected: "running or stopped",
+                });
+            }
+            _ => false,
+        };
+        if vm_state_included {
             let qmp = self.qmp_for_machine(machine).await?;
             qmp.execute_with_timeout(
                 "snapshot-save",
@@ -595,13 +631,11 @@ impl QemuBackend {
                 SNAPSHOT_COMMAND_TIMEOUT,
             )
             .await?;
-            wait_for_snapshot_job(&qmp, &checkpoint_id).await?;
-            true
+            wait_for_snapshot_job(&qmp, checkpoint_id).await?;
         } else {
-            self.run_qemu_img_snapshot("-c", &checkpoint_id, &record.disk_path)
+            self.run_qemu_img_snapshot("-c", checkpoint_id, &record.disk_path)
                 .await?;
-            false
-        };
+        }
 
         let firmware_vars_included = copy_optional_file(
             record.ovmf_vars_path.as_deref(),
@@ -615,7 +649,7 @@ impl QemuBackend {
         .await?;
 
         let checkpoint = CheckpointRef {
-            id: checkpoint_id.clone(),
+            id: checkpoint_id.to_string(),
             machine_id: record.handle.id.clone(),
             created_unix_ms: unix_ms(),
             state_dir: record.handle.state_dir.clone(),
@@ -625,7 +659,7 @@ impl QemuBackend {
             checkpoint: checkpoint.clone(),
             label: label.to_string(),
             backend: "qemu".to_string(),
-            qemu_snapshot: checkpoint_id,
+            qemu_snapshot: checkpoint_id.to_string(),
             disk_state_included: true,
             vm_state_included,
             firmware_vars_included,
@@ -664,10 +698,15 @@ impl QemuBackend {
                 "checkpoint machine id does not match machine record".to_string(),
             ));
         }
-        if self.running.contains_key(&record.handle.id) {
+        let state = self.status_machine(&record.handle).await?;
+        if matches!(state, MachineState::Running | MachineState::Paused) {
             return Err(CoreError::InvalidState {
-                machine: record.handle.name,
-                actual: "running",
+                machine: record.handle.name.clone(),
+                actual: if matches!(state, MachineState::Running) {
+                    "running"
+                } else {
+                    "paused"
+                },
                 expected: "stopped",
             });
         }
@@ -688,6 +727,11 @@ impl QemuBackend {
             .map_err(CoreError::io("read checkpoint metadata", &metadata_path))?;
         let metadata: CheckpointMetadata = serde_json::from_slice(&metadata_bytes)?;
 
+        if !metadata.vm_state_included {
+            self.run_qemu_img_snapshot("-a", &metadata.qemu_snapshot, &record.disk_path)
+                .await?;
+            record.pending_loadvm = None;
+        }
         if metadata.firmware_vars_included {
             let target = record
                 .ovmf_vars_path
@@ -714,13 +758,8 @@ impl QemuBackend {
             copy_dir_all(&checkpoint_dir.join(TPM_DIR), &target).await?;
             record.tpm_state_dir = Some(target);
         }
-
         if metadata.vm_state_included {
             record.pending_loadvm = Some(metadata.qemu_snapshot);
-        } else {
-            self.run_qemu_img_snapshot("-a", &metadata.qemu_snapshot, &record.disk_path)
-                .await?;
-            record.pending_loadvm = None;
         }
         record.handle.state = MachineState::Stopped;
         record.pid = None;
@@ -1356,7 +1395,33 @@ async fn shutdown_running_machine(running: &mut RunningMachine) -> CoreResult<()
 async fn shutdown_swtpm(child: &mut Option<Child>) {
     if let Some(process) = child {
         let _ = process.kill().await;
+        let _ = timeout(Duration::from_secs(2), process.wait()).await;
     }
+}
+
+async fn external_qmp_is_gone(path: &Path) -> CoreResult<bool> {
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(CoreError::io("check external qmp socket", path))?
+    {
+        return Ok(true);
+    }
+    Ok(
+        match timeout(Duration::from_millis(250), QmpClient::connect(path)).await {
+            Err(_) | Ok(Err(_)) => true,
+            Ok(Ok(_)) => false,
+        },
+    )
+}
+
+async fn wait_for_external_qmp_exit(path: &Path) -> CoreResult<bool> {
+    for _ in 0..50 {
+        if external_qmp_is_gone(path).await? {
+            return Ok(true);
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    external_qmp_is_gone(path).await
 }
 
 async fn wait_for_child(child: &mut Child, duration: Duration) -> CoreResult<bool> {
