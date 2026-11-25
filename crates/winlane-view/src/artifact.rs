@@ -4,10 +4,20 @@ use winlane_contracts::FrameRef;
 use crate::error::{ViewError, ViewResult};
 use crate::frame::{Frame, MAX_FRAME_PIXELS, Rgb8};
 
-pub fn frame_from_artifact(metadata: &FrameRef, bytes: &[u8]) -> ViewResult<Frame> {
+/// Validates the artifact hash carried in capture metadata.
+pub fn validate_frame_artifact_hash(metadata: &FrameRef, bytes: &[u8]) -> ViewResult<()> {
     if sha256_hex(bytes) != metadata.sha256 {
         return Err(ViewError::FrameArtifactHashMismatch);
     }
+    Ok(())
+}
+
+/// Decodes artifact dimensions and pixels without validating its hash. Callers
+/// must complete hash validation before exposing the frame as a trusted capture.
+pub fn frame_from_artifact_without_hash_validation(
+    metadata: &FrameRef,
+    bytes: &[u8],
+) -> ViewResult<Frame> {
     let frame = frame_from_ppm(bytes)?;
     if frame.width() != metadata.width || frame.height() != metadata.height {
         return Err(ViewError::FrameArtifactDimensionMismatch {
@@ -18,6 +28,11 @@ pub fn frame_from_artifact(metadata: &FrameRef, bytes: &[u8]) -> ViewResult<Fram
         });
     }
     Ok(frame)
+}
+
+pub fn frame_from_artifact(metadata: &FrameRef, bytes: &[u8]) -> ViewResult<Frame> {
+    validate_frame_artifact_hash(metadata, bytes)?;
+    frame_from_artifact_without_hash_validation(metadata, bytes)
 }
 
 pub fn frame_from_ppm(bytes: &[u8]) -> ViewResult<Frame> {
@@ -59,18 +74,28 @@ pub fn frame_from_ppm(bytes: &[u8]) -> ViewResult<Frame> {
     }
 
     let mut pixels = Vec::with_capacity(pixel_count);
-    for sample in raster.chunks_exact(3 * bytes_per_sample) {
-        let mut channels = [0_u8; 3];
-        for (index, channel) in channels.iter_mut().enumerate() {
-            let offset = index * bytes_per_sample;
-            let value = if bytes_per_sample == 1 {
-                u32::from(sample[offset])
-            } else {
-                u32::from(u16::from_be_bytes([sample[offset], sample[offset + 1]]))
-            };
-            *channel = scale_sample(value, maxval);
+    if maxval == u32::from(u8::MAX) && bytes_per_sample == 1 {
+        pixels.extend(
+            raster
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|sample| Rgb8::new(sample[0], sample[1], sample[2])),
+        );
+    } else {
+        for sample in raster.chunks_exact(3 * bytes_per_sample) {
+            let mut channels = [0_u8; 3];
+            for (index, channel) in channels.iter_mut().enumerate() {
+                let offset = index * bytes_per_sample;
+                let value = if bytes_per_sample == 1 {
+                    u32::from(sample[offset])
+                } else {
+                    u32::from(u16::from_be_bytes([sample[offset], sample[offset + 1]]))
+                };
+                *channel = scale_sample(value, maxval);
+            }
+            pixels.push(Rgb8::new(channels[0], channels[1], channels[2]));
         }
-        pixels.push(Rgb8::new(channels[0], channels[1], channels[2]));
     }
     Frame::new(width, height, pixels)
 }
@@ -159,5 +184,44 @@ mod tests {
     fn rejects_truncated_raster() {
         let result = frame_from_ppm(b"P6 2 1 255\n\xff\x00\x00");
         assert!(matches!(result, Err(ViewError::InvalidFrameArtifact(_))));
+    }
+
+    #[test]
+    fn artifact_hash_validation_accepts_matching_hash_and_rejects_mismatch() {
+        let bytes = b"P6 1 1 255
+";
+        let metadata = FrameRef {
+            sha256: sha256_hex(bytes),
+            width: 1,
+            height: 1,
+            captured_unix_ms: 1,
+            blob_path: "frame.ppm".to_string(),
+        };
+        assert!(validate_frame_artifact_hash(&metadata, bytes).is_ok());
+        let mismatched = FrameRef {
+            sha256: "0".repeat(64),
+            ..metadata
+        };
+        assert!(matches!(
+            validate_frame_artifact_hash(&mismatched, bytes),
+            Err(ViewError::FrameArtifactHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn unvalidated_decode_still_checks_dimensions() {
+        let bytes = b"P6 1 1 255
+";
+        let metadata = FrameRef {
+            sha256: "0".repeat(64),
+            width: 2,
+            height: 1,
+            captured_unix_ms: 1,
+            blob_path: "frame.ppm".to_string(),
+        };
+        assert!(matches!(
+            frame_from_artifact_without_hash_validation(&metadata, bytes),
+            Err(ViewError::FrameArtifactDimensionMismatch { .. })
+        ));
     }
 }

@@ -112,17 +112,18 @@ async fn capture_transient_frame_decodes_artifact_and_removes_transient_file() {
         .expect("capture frame");
     server.await.expect("server task");
 
-    assert_eq!(captured.frame.width(), 2);
-    assert_eq!(captured.frame.height(), 2);
-    assert_eq!(captured.frame.pixel(0, 0), Some(Rgb8::new(255, 0, 0)));
-    assert_eq!(captured.frame.pixel(1, 0), Some(Rgb8::new(0, 255, 0)));
-    assert_eq!(captured.frame.pixel(0, 1), Some(Rgb8::new(0, 0, 255)));
-    assert_eq!(captured.frame.pixel(1, 1), Some(Rgb8::new(255, 255, 255)));
+    let frame = captured.decode_frame().expect("decode captured frame");
+    assert_eq!(frame.width(), 2);
+    assert_eq!(frame.height(), 2);
+    assert_eq!(frame.pixel(0, 0), Some(Rgb8::new(255, 0, 0)));
+    assert_eq!(frame.pixel(1, 0), Some(Rgb8::new(0, 255, 0)));
+    assert_eq!(frame.pixel(0, 1), Some(Rgb8::new(0, 0, 255)));
+    assert_eq!(frame.pixel(1, 1), Some(Rgb8::new(255, 255, 255)));
     assert!(!frame_path.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capture_transient_frame_removes_transient_file_after_artifact_parse_error() {
+async fn capture_transient_frame_defers_artifact_decode_errors_and_removes_file() {
     let root = tempfile::tempdir().expect("temporary directory");
     let socket_path = root.path().join("control.sock");
     let frame_path = root.path().join("frame.ppm");
@@ -137,10 +138,40 @@ async fn capture_transient_frame_removes_transient_file_after_artifact_parse_err
     wait_for_socket(&socket_path).await;
 
     let client = UnixControlClient::new(socket_path);
-    let result = capture_transient_frame(&client, &machine()).await;
+    let captured = capture_transient_frame(&client, &machine())
+        .await
+        .expect("capture invalid artifact lazily");
     server.await.expect("server task");
 
-    assert!(result.is_err());
+    assert!(captured.decode_frame().is_err());
+    assert!(!frame_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_transient_frame_enforces_hash_validation_when_decoded() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let frame_path = root.path().join("frame.ppm");
+    tokio::fs::write(&frame_path, ppm_fixture_bytes())
+        .await
+        .expect("write frame fixture");
+    let mut metadata = valid_frame_metadata(frame_path.clone());
+    metadata["sha256"] = serde_json::Value::String("0".repeat(64));
+    let server = spawn_capture_server(socket_path.clone(), frame_path.clone(), metadata);
+    wait_for_socket(&socket_path).await;
+
+    let client = UnixControlClient::new(socket_path);
+    let captured = capture_transient_frame(&client, &machine())
+        .await
+        .expect("capture mismatched artifact lazily");
+    server.await.expect("server task");
+
+    assert!(matches!(
+        captured.decode_frame(),
+        Err(winlane_cli::CliError::View(
+            winlane_view::ViewError::FrameArtifactHashMismatch
+        ))
+    ));
     assert!(!frame_path.exists());
 }
 

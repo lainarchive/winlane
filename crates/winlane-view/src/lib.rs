@@ -10,7 +10,10 @@ pub mod input;
 pub mod render;
 pub mod viewport;
 
-pub use artifact::{frame_from_artifact, frame_from_ppm};
+pub use artifact::{
+    frame_from_artifact, frame_from_artifact_without_hash_validation, frame_from_ppm,
+    validate_frame_artifact_hash,
+};
 pub use detect::{
     DetectionSource, GraphicsProtocol, ProtocolSupport, TerminalCapabilities, TerminalEnvironment,
     detect_capabilities,
