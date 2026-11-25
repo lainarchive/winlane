@@ -12,6 +12,6 @@ Rules:
 
 `MachineHandle` is the backend-owned identity returned after creation. Callers do not assume that the state directory layout is stable across backends.
 
-`CheckpointRef` describes a restorable machine state. A checkpoint includes disk state plus enough firmware and TPM metadata to avoid a machine that boots differently after restore.
+`CheckpointRef` is an opaque, machine-local reference to checkpoint state managed by the backend. Running-machine checkpoints use QEMU internal memory/device snapshots; stopped-machine checkpoints preserve disk state. Firmware-variable and TPM state consistency across checkpoint restore is not currently guaranteed; treat those states as backend-specific and validate them separately before relying on them.
 
 `base_image_path` optionally names a validated golden qcow2. Runtime machines must use copy-on-write backing files; the golden image is never mutated. Machine clones are independent flattened qcow2 copies, not backing-file children of the source. `guest_agent` requests a host-only QEMU guest-agent channel for semantic and file control.

@@ -10,23 +10,9 @@ Each event has:
 - `kind`: stable lowercase event name such as `machine_started`
 - `payload`: JSON object specific to the event
 
-Frame blobs, transferred files, and installer logs are stored by content hash. Events link to those blobs instead of embedding large payloads.
+Large MCP `process_run` stdout/stderr and `ui_tree` result payloads are currently stored by content hash. Events link to those blobs instead of embedding those large payloads. Frame artifacts, transferred file contents, and installer logs are not yet uniformly content-addressed; do not infer blob references except through the explicit verification convention below.
 
-Required first-pass event kinds:
-
-- `machine_created`
-- `machine_started`
-- `frame_captured`
-- `input_sent`
-- `checkpoint_created`
-- `checkpoint_deleted`
-- `checkpoint_restored`
-- `file_imported`
-- `file_exported`
-- `process_started`
-- `process_exited`
-- `network_policy_changed`
-- `error`
+The MCP recorder currently emits operation-specific kinds including `machine_created`, `machine_cloned`, `machine_destroyed`, `machine_started`, `machine_stopped`, `machine_status`, `frame_captured`, `input_sent`, `ui_tree_read`, `process_exited`, `file_imported`, `file_exported`, `checkpoint_created`, `checkpoint_deleted`, and `checkpoint_restored`. Kind validation checks shape rather than restricting events to a closed list; `error` and future operation-specific kinds may also appear.
 
 The evidence log can contain secrets visible on the guest screen or in command arguments. Treat exports as sensitive artifacts.
 

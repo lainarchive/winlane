@@ -62,7 +62,7 @@ Not yet proven end-to-end:
 - hardware keyboard input is limited to printable ASCII plus newline and tab, paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across real terminal emulators beyond the validated kitty, Ghostty, and WezTerm X11 paths
-- live-view throughput above the validated 5 captures/s default
+- sustained real-guest live-view throughput above the conservative 5 fps default; synthetic real-kitty validation nearly sustained 15 fps but showed high terminal CPU and requested 30 fps converged to about 14.8 captures/s
 - long-running stability and broader concurrent machine use
 
 Running checkpoints include RAM and can be several GiB. Clones collapse the backing chain into independent qcow2 images so the source can keep changing or be destroyed safely; cloning a large Windows disk can take real time and disk space. Clones receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
@@ -224,7 +224,7 @@ cargo run --release -p winlane-cli -- view \
   --machine demo-1
 ```
 
-Ctrl-Q detaches. Terminal paste normalizes line endings and rejects control bytes or invisible formatting characters before anything is typed into the guest. Unsupported Unicode text is rejected by the hardware keyboard path rather than being turned into incorrect key events.
+Press Ctrl-Q twice consecutively to detach. Terminal paste normalizes line endings and rejects control bytes or invisible formatting characters before anything is typed into the guest. Unsupported Unicode text is rejected by the hardware keyboard path rather than being turned into incorrect key events.
 
 kitty, Ghostty, and WezTerm receive PNG frames that winlane scales host-side with CatmullRom to the exact aspect-fit physical-pixel rectangle. Frames are transmitted at that exact pixel size without terminal `c`/`r` rescaling and positioned with cursor row/column plus `X`/`Y` subcell offsets, so visual geometry and input inverse mapping share the same `RenderPlan`. winlane uses real terminal pixel geometry from `TIOCGWINSZ` when available and the `--cell-width-px`/`--cell-height-px` values as fallback geometry. Fit-to-pane can still be physically small in a split pane. Use `--zoom PERCENT` (100-400) for a fixed center crop, then Ctrl+Arrow keys to pan the crop. The zoom is a viewport crop, not a claim that a tiny pane can show the whole desktop readably.
 
