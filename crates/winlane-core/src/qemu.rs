@@ -149,7 +149,7 @@ impl QemuBackend {
 
     /// Return valid machine records directly under the backend root, sorted by name.
     /// Malformed or unrelated entries are ignored so one stale artifact cannot hide machines.
-    pub async fn list_machines(&self) -> CoreResult<Vec<MachineHandle>> {
+    pub async fn list_machines(&mut self) -> CoreResult<Vec<MachineHandle>> {
         let mut entries = tokio::fs::read_dir(&self.root_dir)
             .await
             .map_err(CoreError::io("read machine root", &self.root_dir))?;
@@ -178,7 +178,11 @@ impl QemuBackend {
             {
                 continue;
             }
-            machines.push(record.handle);
+            let mut handle = record.handle;
+            if let Ok(state) = self.status_machine(&handle).await {
+                handle.state = state;
+            }
+            machines.push(handle);
         }
         machines.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
         Ok(machines)
@@ -1737,7 +1741,7 @@ mod tests {
     #[tokio::test]
     async fn list_machines_returns_valid_records_and_ignores_malformed_entries() {
         let root = tempfile::tempdir().expect("temporary root");
-        let backend = QemuBackend::new(root.path()).await.expect("create backend");
+        let mut backend = QemuBackend::new(root.path()).await.expect("create backend");
         let state_dir = backend.root_dir().join("builder");
         tokio::fs::create_dir(&state_dir)
             .await
