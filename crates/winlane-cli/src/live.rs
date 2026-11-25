@@ -550,6 +550,7 @@ fn control_event_for_input(
     context: InputMappingContext,
 ) -> Option<ControlEvent> {
     match map_input(input, context) {
+        Ok(InputMapping::Forward(ControlEvent::Type { text })) if text.is_empty() => None,
         Ok(InputMapping::Forward(event)) => supported_control_event(event),
         Ok(InputMapping::Resize { .. } | InputMapping::OutsideFrame) => None,
         Err(InputError::Paste(_)) => None,
@@ -778,6 +779,12 @@ mod tests {
     #[test]
     fn paste_escape_bytes_are_dropped() {
         let input = ViewerInput::Paste("safe\x1b[2J".to_string());
+        assert_eq!(control_event_for_input(&input, input_context()), None);
+    }
+
+    #[test]
+    fn empty_type_text_is_dropped() {
+        let input = ViewerInput::Paste(String::new());
         assert_eq!(control_event_for_input(&input, input_context()), None);
     }
 

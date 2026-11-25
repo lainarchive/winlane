@@ -79,6 +79,31 @@ Thus 5 fps is sustainable with headroom in real kitty, 15 fps is nearly sustaine
 
 This is a synthetic local frame-stream measurement, not Windows/QEMU validation, and the fake control plane's fixed artifact-generation cost means real guest-backed throughput may be lower. Ghostty and WezTerm were not measured in this lane because reproducible installs were not present on this VM; their prior correctness validation does not include throughput claims.
 
+## Real terminal input validation
+
+`scripts/validate-terminal-input.py` runs the live viewer in real kitty 0.51.1 under Xvfb against deterministic local frame artifacts and a fake Unix control plane. It uses `xdotool` for physical X11 keyboard and mouse input where practical, and kitty remote-control `send-text` only to inject exact Unicode or bracketed-paste byte sequences. It records the control-plane events emitted by the viewer and validates exact inverse-mapped source pixels.
+
+```sh
+cargo build -p winlane-cli
+python3 scripts/validate-terminal-input.py --output-dir /tmp/winlane-terminal-input
+```
+
+The recorded debug-binary run on Ubuntu 22.04 passed with these results:
+
+- Physical `xdotool type` input `aZ09` produced exactly those four guest text characters.
+- Physical Return, Tab, and Ctrl+C produced `enter`, `tab`, and `ctrl+c` key chords.
+- Injected Unicode `é` produced no guest text event, matching the ASCII-only hardware keyboard boundary.
+- Bracketed paste `one\r\ntwo\rthree\tend` was normalized to exactly `one\ntwo\nthree\tend`.
+- Bracketed paste containing `safe\x1b[2J` was rejected. The first harness run exposed that a control-only paste could still forward one empty `type` event; the narrow fix now drops empty guest text events before control-plane forwarding.
+- A center click in the initial 120x42-cell geometry (10x19-pixel cells) reached source pixel `(321,202)` exactly at zoom 200.
+- Mouse wheel buttons inside the frame produced both `up` and `down` scroll events.
+- Ctrl+Right was consumed as viewport pan and did not reach the control plane; the same terminal-cell click then reached `(401,202)` exactly, matching the 80-pixel crop pan.
+- After resizing the OS window to 1000x700 (100x36 cells, 10x19-pixel cells), the same center-cell click reached `(401,203)` exactly.
+- After one kitty font zoom step (90x30 cells, 11x23-pixel cells), the same center-cell click reached `(401,203)` exactly.
+- One Ctrl+Q did not detach; a second consecutive Ctrl+Q detached the viewer.
+
+This is synthetic fake-control validation in kitty only. It does not validate Windows/QEMU input delivery, OS clipboard integration, Ghostty, WezTerm, other kitty versions, or terminal input under tmux.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
