@@ -128,7 +128,7 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
         "screendump",
         "input-send-event",
         "send-key",
-        "savevm",
+        "snapshot-save",
     ] {
         assert!(commands.contains(expected), "missing {expected} in QMP log");
     }

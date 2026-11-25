@@ -88,6 +88,7 @@ def main():
         qga_server.bind(qga_path)
         qga_server.listen(4)
     log_path = socket_path + ".commands"
+    snapshot_job_ids = []
     stopping = threading.Event()
 
     def delayed_exit(delay=0.05):
@@ -140,6 +141,15 @@ def main():
                     reply(connection, identifier, {"return": {"status": "running", "running": True, "singlestep": False}})
                 elif execute == "screendump":
                     write_ppm(arguments["filename"])
+                    reply(connection, identifier, {"return": {}})
+                elif execute in {"snapshot-save", "snapshot-load"}:
+                    snapshot_job_ids.append(arguments.get("job-id", "checkpoint-fake"))
+                    reply(connection, identifier, {"return": {}})
+                elif execute == "cont":
+                    reply(connection, identifier, {"return": {}})
+                elif execute == "query-jobs":
+                    reply(connection, identifier, {"return": [{"id": job_id, "type": "snapshot", "status": "concluded", "current-progress": 1, "total-progress": 1} for job_id in snapshot_job_ids]})
+                elif execute == "job-dismiss":
                     reply(connection, identifier, {"return": {}})
                 elif execute in {"input-send-event", "send-key", "savevm", "loadvm", "human-monitor-command"}:
                     reply(connection, identifier, {"return": {}})

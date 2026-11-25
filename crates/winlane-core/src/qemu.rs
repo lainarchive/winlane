@@ -24,6 +24,7 @@ const SPEC_FILE: &str = "spec.json";
 const SCREEN_FILE: &str = "screen.json";
 const FRAME_DIR: &str = "frames";
 const CHECKPOINT_DIR: &str = "checkpoints";
+const SYSTEM_DISK_NODE: &str = "winlane-system";
 const DISK_FILE: &str = "disk.qcow2";
 const QMP_SOCKET_FILE: &str = "qmp.sock";
 const QGA_SOCKET_FILE: &str = "qga.sock";
@@ -267,6 +268,32 @@ impl QemuBackend {
             }
         };
 
+        if let Some(snapshot) = record.pending_loadvm.clone() {
+            let load_result: CoreResult<()> = async {
+                qmp.execute(
+                    "snapshot-load",
+                    Some(json!({
+                        "job-id": format!("load-{snapshot}"),
+                        "tag": snapshot,
+                        "vmstate": SYSTEM_DISK_NODE,
+                        "devices": [SYSTEM_DISK_NODE],
+                    })),
+                )
+                .await?;
+                wait_for_snapshot_job(&qmp, &format!("load-{snapshot}")).await?;
+                qmp.execute("cont", None).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = load_result {
+                let _ = child.kill().await;
+                if let Some(process) = &mut swtpm {
+                    let _ = process.kill().await;
+                }
+                return Err(error);
+            }
+        }
+
         record.pid = child.id();
         record.handle.state = MachineState::Running;
         record.pending_loadvm = None;
@@ -465,10 +492,16 @@ impl QemuBackend {
         let vm_state_included = if running {
             let qmp = self.qmp_for_machine(machine).await?;
             qmp.execute(
-                "human-monitor-command",
-                Some(json!({ "command-line": format!("savevm {checkpoint_id}") })),
+                "snapshot-save",
+                Some(json!({
+                    "job-id": checkpoint_id,
+                    "tag": checkpoint_id,
+                    "vmstate": SYSTEM_DISK_NODE,
+                    "devices": [SYSTEM_DISK_NODE],
+                })),
             )
             .await?;
+            wait_for_snapshot_job(&qmp, &checkpoint_id).await?;
             true
         } else {
             self.run_qemu_img_snapshot("-c", &checkpoint_id, &record.disk_path)
@@ -835,7 +868,7 @@ impl QemuBackend {
         args.extend([
             "-drive".to_string(),
             format!(
-                "file={},format=qcow2,if=virtio",
+                "file={},format=qcow2,if=virtio,node-name=winlane-system",
                 qemu_option_escape(&path_to_string(&record.disk_path)?)
             ),
         ]);
@@ -895,8 +928,8 @@ impl QemuBackend {
                 "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0".to_string(),
             ]);
         }
-        if let Some(snapshot) = &record.pending_loadvm {
-            args.extend(["-loadvm".to_string(), snapshot.clone()]);
+        if record.pending_loadvm.is_some() {
+            args.push("-S".to_string());
         }
         Ok(args)
     }
@@ -1161,6 +1194,32 @@ async fn connect_qmp_with_retry(path: &Path) -> CoreResult<QmpClient> {
     match last_error {
         Some(error) => Err(error.into()),
         None => Err(CoreError::Timeout("QMP socket")),
+    }
+}
+
+async fn wait_for_snapshot_job(qmp: &QmpClient, job_id: &str) -> CoreResult<()> {
+    let started = std::time::Instant::now();
+    loop {
+        let jobs = qmp.execute("query-jobs", None).await?;
+        let job = jobs.as_array().and_then(|jobs| {
+            jobs.iter()
+                .find(|job| job.get("id").and_then(Value::as_str) == Some(job_id))
+        });
+        if let Some(job) = job {
+            if let Some(error) = job.get("error").and_then(Value::as_str) {
+                return Err(CoreError::Qemu(format!("snapshot job failed: {error}")));
+            }
+            if job.get("status").and_then(Value::as_str) == Some("concluded") {
+                let _ = qmp
+                    .execute("job-dismiss", Some(json!({ "id": job_id })))
+                    .await;
+                return Ok(());
+            }
+        }
+        if started.elapsed() > Duration::from_secs(300) {
+            return Err(CoreError::Timeout("snapshot job completion"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
