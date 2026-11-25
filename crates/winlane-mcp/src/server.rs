@@ -176,6 +176,7 @@ fn tool_uses_machine(tool: &str) -> bool {
             | "machine_start"
             | "machine_stop"
             | "machine_wait"
+            | "machine_logs"
             | "screenshot"
             | "click"
             | "move"
@@ -394,6 +395,20 @@ mod tests {
         .await
         .unwrap();
         assert!(response["result"]["tools"].as_array().unwrap().len() >= 11);
+    }
+
+    #[test]
+    fn every_machine_schema_tool_uses_machine_normalization() {
+        let tools = crate::tool_definitions();
+        for tool in tools.as_array().expect("tool definitions are an array") {
+            if tool.pointer("/inputSchema/properties/machine").is_some() {
+                let name = tool.get("name").and_then(Value::as_str).expect("tool name");
+                assert!(
+                    tool_uses_machine(name),
+                    "{name} must normalize machine references"
+                );
+            }
+        }
     }
 
     #[test]
