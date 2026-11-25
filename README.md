@@ -307,7 +307,7 @@ cargo run --release -p winlane-cli -- guest import \
   --guest-path 'C:\workspace'
 ```
 
-File transfer is capped at 512 MiB per file. Workspace transfer is capped at 10,000 archive members, 512 MiB total file bytes, and 256 MiB per member. Links are rejected, archive path traversal is rejected, and member paths differing only by Unicode-lowercase case are conservatively rejected because Windows filesystems are commonly case-insensitive. Transfer uses bounded chunks rather than whole-file memory buffering. There is no shared clipboard and no host folder pass-through.
+File transfer is capped at 512 MiB per file. Workspace transfer is capped at 10,000 archive members, 512 MiB total file bytes, and 256 MiB per member. Links are rejected, archive path traversal is rejected, and member paths differing only by Unicode-lowercase case are conservatively rejected because Windows filesystems are commonly case-insensitive. Unicode member names are written as UTF-8 pax path metadata; real Windows Unicode round-trip validation is still required before merge. Transfer uses bounded chunks rather than whole-file memory buffering. There is no shared clipboard and no host folder pass-through.
 
 ## MCP
 
