@@ -27,6 +27,7 @@ const CHECKPOINT_DIR: &str = "checkpoints";
 const SYSTEM_DISK_NODE: &str = "winlane-system";
 const SNAPSHOT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const KEY_HOLD_TIME_MS: u64 = 30;
+const CLICK_HOLD_TIME: Duration = Duration::from_millis(50);
 const DISK_FILE: &str = "disk.qcow2";
 const QMP_SOCKET_FILE: &str = "qmp.sock";
 const QGA_SOCKET_FILE: &str = "qga.sock";
@@ -864,13 +865,31 @@ impl QemuBackend {
             MouseButton::Middle => "middle",
             MouseButton::Right => "right",
         };
+        // QEMU syncs input only at the end of each input-send-event call.
         qmp.execute(
             "input-send-event",
             Some(json!({
                 "events": [
                     {"type": "abs", "data": {"axis": "x", "value": x}},
-                    {"type": "abs", "data": {"axis": "y", "value": y}},
-                    {"type": "btn", "data": {"button": button, "down": true}},
+                    {"type": "abs", "data": {"axis": "y", "value": y}}
+                ]
+            })),
+        )
+        .await?;
+        qmp.execute(
+            "input-send-event",
+            Some(json!({
+                "events": [
+                    {"type": "btn", "data": {"button": button, "down": true}}
+                ]
+            })),
+        )
+        .await?;
+        sleep(CLICK_HOLD_TIME).await;
+        qmp.execute(
+            "input-send-event",
+            Some(json!({
+                "events": [
                     {"type": "btn", "data": {"button": button, "down": false}}
                 ]
             })),

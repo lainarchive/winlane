@@ -232,6 +232,83 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn click_uses_separate_move_down_up_qmp_syncs() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("clicktest"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    backend
+        .capture_frame(&machine)
+        .await
+        .expect("capture frame");
+
+    let started = Instant::now();
+    backend
+        .send_control_event(
+            &machine,
+            &ControlEvent::Click {
+                x: 10,
+                y: 12,
+                button: MouseButton::Left,
+            },
+        )
+        .await
+        .expect("click");
+    assert!(started.elapsed() >= Duration::from_millis(45));
+
+    let command_log = root.path().join("clicktest/qmp.sock.commands");
+    let commands = std::fs::read_to_string(command_log).expect("QMP command log");
+    let input_commands = commands
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|command| {
+            command.get("execute").and_then(serde_json::Value::as_str) == Some("input-send-event")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(input_commands.len(), 3);
+
+    let move_events = input_commands[0]["arguments"]["events"]
+        .as_array()
+        .expect("move events");
+    assert_eq!(
+        move_events,
+        &vec![
+            serde_json::json!({"type":"abs","data":{"axis":"x","value":5201}}),
+            serde_json::json!({"type":"abs","data":{"axis":"y","value":8366}})
+        ]
+    );
+    let down_events = input_commands[1]["arguments"]["events"]
+        .as_array()
+        .expect("down events");
+    assert_eq!(
+        down_events,
+        &vec![serde_json::json!({"type":"btn","data":{"button":"left","down":true}})]
+    );
+    let up_events = input_commands[2]["arguments"]["events"]
+        .as_array()
+        .expect("up events");
+    assert_eq!(
+        up_events,
+        &vec![serde_json::json!({"type":"btn","data":{"button":"left","down":false}})]
+    );
+
+    backend.stop_machine(&machine).await.expect("stop machine");
+    backend
+        .destroy_machine(&machine)
+        .await
+        .expect("destroy machine");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_create_and_clone_remove_partial_state() {
     let root = tempfile::tempdir().expect("temporary machine root");
     let mut backend = QemuBackend::new(root.path())
