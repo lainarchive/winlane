@@ -21,11 +21,11 @@ pub const MAX_WORKSPACE_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_WORKSPACE_MEMBERS: u64 = 10_000;
 pub const MAX_WORKSPACE_PATH_BYTES: usize = 255;
 pub const MAX_WORKSPACE_ARCHIVE_BYTES: u64 = 544 * 1024 * 1024;
+const MAX_TRANSPORT_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 const TAR_GUEST_PATH: &str = r"C:\Windows\System32\tar.exe";
 const TRANSFER_CHUNK_BYTES: usize = 1024 * 1024;
 const TAR_BLOCK_BYTES: usize = 512;
-const MAX_PAX_HEADER_BYTES: u64 = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveLimits {
@@ -33,6 +33,15 @@ pub struct ArchiveLimits {
     pub max_member_bytes: u64,
     pub max_total_bytes: u64,
     pub max_path_bytes: usize,
+}
+
+fn transport_archive_limits() -> ArchiveLimits {
+    ArchiveLimits {
+        max_members: MAX_WORKSPACE_MEMBERS + 2,
+        max_member_bytes: MAX_WORKSPACE_MEMBER_BYTES.max(MAX_TRANSPORT_MANIFEST_BYTES),
+        max_total_bytes: MAX_WORKSPACE_TOTAL_BYTES + MAX_TRANSPORT_MANIFEST_BYTES,
+        max_path_bytes: MAX_WORKSPACE_PATH_BYTES,
+    }
 }
 
 impl Default for ArchiveLimits {
@@ -49,6 +58,7 @@ impl Default for ArchiveLimits {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceTransferRef {
     pub sha256: String,
+    pub transport_sha256: String,
     pub bytes: u64,
     pub members: u64,
     pub file_bytes: u64,
@@ -60,6 +70,26 @@ pub struct WorkspaceTransferRef {
 struct ArchiveStats {
     members: u64,
     file_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TransportManifest {
+    format: String,
+    version: u32,
+    entries: Vec<TransportEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TransportEntry {
+    path: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blob: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
 }
 
 pub fn import_file_blocking<T: QgaTransport>(
@@ -125,7 +155,7 @@ pub fn import_workspace_blocking<T: QgaTransport>(
     overwrite: bool,
 ) -> UiaResult<WorkspaceTransferRef> {
     validate_guest_transfer_path(guest_dir, true)?;
-    let (archive, stats) = create_workspace_archive(host_dir)?;
+    let (archive, stats, logical_sha256) = create_workspace_archive(host_dir)?;
     let archive_path = archive.path.clone();
     let archive_guest_path = guest_unique_path("workspace-import.tar");
     let staging_dir = guest_workspace_sibling_path(guest_dir, "workspace-import")?;
@@ -139,9 +169,12 @@ pub fn import_workspace_blocking<T: QgaTransport>(
             MAX_WORKSPACE_ARCHIVE_BYTES,
         )?;
         verify_guest_file(control, &archive_guest_path, bytes, &sha256)?;
-        run_guest_tar(control, &archive_guest_path, &staging_dir, true)?;
+        let transport_dir = format!(r"{staging_dir}\transport");
+        let tree_dir = format!(r"{staging_dir}\tree");
+        run_guest_tar(control, &archive_guest_path, &transport_dir, true)?;
+        run_guest_materialize(control, &transport_dir, &tree_dir)?;
         if let Err(error) =
-            finalize_guest_workspace(control, &staging_dir, guest_dir, &backup_dir, overwrite)
+            finalize_guest_workspace(control, &tree_dir, guest_dir, &backup_dir, overwrite)
         {
             if matches!(error, UiaError::DestinationExists) {
                 return Err(error);
@@ -151,16 +184,17 @@ pub fn import_workspace_blocking<T: QgaTransport>(
                 message: error.to_string(),
             });
         }
-        Ok::<(u64, String), UiaError>((bytes, sha256))
+        Ok::<(u64, String, String), UiaError>((bytes, sha256, logical_sha256.clone()))
     })();
     cleanup_guest_path(control, &archive_guest_path, false);
     cleanup_guest_path(control, &staging_dir, true);
     if result.is_ok() {
         cleanup_guest_path(control, &backup_dir, true);
     }
-    let (bytes, sha256) = result?;
+    let (bytes, transport_sha256, sha256) = result?;
     Ok(WorkspaceTransferRef {
         sha256,
+        transport_sha256,
         bytes,
         members: stats.members,
         file_bytes: stats.file_bytes,
@@ -181,8 +215,10 @@ pub fn export_workspace_blocking<T: QgaTransport>(
     let archive_path = archive.path.clone();
     let archive_guest_path = guest_unique_path("workspace-export.tar");
     let staging = StagingDirectory::create(host_dir, overwrite)?;
+    let transport_guest_path = guest_unique_path("workspace-export-transport");
     let result = (|| {
-        run_guest_tar(control, &archive_guest_path, guest_dir, false)?;
+        run_guest_export_transport(control, guest_dir, &transport_guest_path)?;
+        run_guest_tar(control, &archive_guest_path, &transport_guest_path, false)?;
         let (guest_size, guest_hash) = guest_file_info(control, &archive_guest_path)?;
         if guest_size > MAX_WORKSPACE_ARCHIVE_BYTES {
             return Err(UiaError::TransferTooLarge {
@@ -198,15 +234,27 @@ pub fn export_workspace_blocking<T: QgaTransport>(
             MAX_WORKSPACE_ARCHIVE_BYTES,
             Some((guest_size, &guest_hash)),
         )?;
-        let stats =
-            extract_workspace_archive(&archive_path, &staging.path, ArchiveLimits::default())?;
+        let unpack_owner = private_archive()?;
+        let unpack_dir = unpack_owner.directory.join("unpack");
+        fs::create_dir(&unpack_dir).map_err(|error| host_io(&unpack_dir, error))?;
+        extract_workspace_archive(&archive_path, &unpack_dir, transport_archive_limits())?;
+        let (probe_manifest, _) = read_transport_manifest(&unpack_dir)?;
+        validate_transport_layout(&unpack_dir, &probe_manifest)?;
+        let (manifest, stats_file_bytes) = materialize_transport(&unpack_dir, &staging.path)?;
         staging.persist()?;
-        Ok::<(u64, String, ArchiveStats), UiaError>((bytes, sha256, stats))
+        let logical_sha256 = canonical_manifest_hash(&manifest);
+        let stats = ArchiveStats {
+            members: manifest.entries.len() as u64,
+            file_bytes: stats_file_bytes,
+        };
+        Ok::<(u64, String, ArchiveStats, String), UiaError>((bytes, sha256, stats, logical_sha256))
     })();
     cleanup_guest_path(control, &archive_guest_path, false);
-    let (bytes, sha256, stats) = result?;
+    cleanup_guest_path(control, &transport_guest_path, true);
+    let (bytes, transport_sha256, stats, sha256) = result?;
     Ok(WorkspaceTransferRef {
         sha256,
+        transport_sha256,
         bytes,
         members: stats.members,
         file_bytes: stats.file_bytes,
@@ -437,7 +485,7 @@ fn finalize_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $backup){{exit 5}};if(Test-Path -LiteralPath $staging){{$item=Get-Item -LiteralPath $staging -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}}}};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{$item=Get-Item -LiteralPath $backup -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
+        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;function Has-Reparse($dir){{foreach($child in [System.IO.Directory]::EnumerateFileSystemEntries($dir)){{$attrs=[System.IO.File]::GetAttributes($child);if(($attrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{return $true}};if(($attrs -band [System.IO.FileAttributes]::Directory) -ne 0){{if(Has-Reparse $child){{return $true}}}}}};return $false}};if(Test-Path -LiteralPath $backup){{exit 5}};if(Test-Path -LiteralPath $staging){{$item=Get-Item -LiteralPath $staging -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}}}};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}if(Has-Reparse $target){{exit 5}};[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{$item=Get-Item -LiteralPath $backup -Force;if(($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{exit 5}};Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop;if(Test-Path -LiteralPath $backup){{Write-Error 'backup cleanup incomplete';exit 1}}}};exit 0"
     );
     let capture = run_powershell(control, &script, 60_000)?;
     match capture.exit_code {
@@ -473,6 +521,48 @@ fn run_powershell<T: QgaTransport>(
     )
 }
 
+fn run_guest_export_transport<T: QgaTransport>(
+    control: &mut BlockingUiaControl<T>,
+    source: &str,
+    transport: &str,
+) -> UiaResult<()> {
+    let source = ps_quote(source);
+    let transport = ps_quote(transport);
+    let script = format!(
+        "$source={source};$transport={transport};function Fail($m){{Write-Error $m;exit 1}};$script:entries=New-Object System.Collections.ArrayList;[System.IO.Directory]::CreateDirectory((Join-Path $transport 'blobs'))|Out-Null;function Walk($dir,$prefix){{foreach($item in [System.IO.Directory]::EnumerateFileSystemEntries($dir)){{$name=[System.IO.Path]::GetFileName($item);$rel=$name;if($prefix.Length -gt 0){{$rel=$prefix+'/'+$name}};if([System.Text.Encoding]::UTF8.GetByteCount($rel) -gt 255){{Fail 'path too long'}};if($script:entries.Count -ge 10000){{Fail 'too many entries'}};$attrs=[System.IO.File]::GetAttributes($item);if(($attrs -band [System.IO.FileAttributes]::ReparsePoint) -ne 0){{Fail 'reparse point'}};if(($attrs -band [System.IO.FileAttributes]::Directory) -ne 0){{[void]$script:entries.Add([pscustomobject]@{{path=$rel;type='directory'}});Walk $item $rel}}elseif(($attrs -band [System.IO.FileAttributes]::Device) -eq 0){{[void]$script:entries.Add([pscustomobject]@{{path=$rel;type='file';blob=0;size=[int64]0;sha256=''}})}}else{{Fail 'unsupported member'}}}}}};if(-not (Test-Path -LiteralPath $source -PathType Container)){{Fail 'source missing'}};Walk $source '';$cases=@{{}};foreach($e in $script:entries){{$lower=([string]$e.path).ToLowerInvariant();if($cases.ContainsKey($lower)){{Fail 'case duplicate'}};$cases[$lower]=1}};$script:entries=@($script:entries|Sort-Object {{[string]$_.path}});$blob=0;$totalBytes=[int64]0;foreach($e in @($script:entries|Where-Object{{$_.type -eq 'file'}})){{if($blob -ge 10000){{Fail 'too many files'}};$src=Join-Path $source (([string]$e.path).Replace('/','\'));$info=Get-Item -LiteralPath $src;if($info.Length -gt 268435456){{Fail 'file too large'}};$totalBytes += $info.Length;if($totalBytes -gt 536870912){{Fail 'workspace too large'}};$dest=Join-Path $transport ([System.String]::Format('blobs\\{{0:D6}}',$blob));[System.IO.File]::Copy($src,$dest,$false);$hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash.ToLowerInvariant();$e.blob=$blob;$e.size=(Get-Item -LiteralPath $dest).Length;$e.sha256=$hash;$blob++}};$manifest=[pscustomobject]@{{format='winlane-workspace-transport';version=1;entries=$script:entries}};$json=$manifest|ConvertTo-Json -Depth 5 -Compress;[System.IO.File]::WriteAllText((Join-Path $transport 'manifest.json'),$json,[System.Text.UTF8Encoding]::new($false));exit 0"
+    );
+    let capture = run_powershell(control, &script, 600_000)?;
+    if capture.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(UiaError::Helper {
+            exit_code: capture.exit_code,
+            message: process_output_summary(&capture),
+        })
+    }
+}
+
+fn run_guest_materialize<T: QgaTransport>(
+    control: &mut BlockingUiaControl<T>,
+    transport: &str,
+    tree: &str,
+) -> UiaResult<()> {
+    let transport = ps_quote(transport);
+    let tree = ps_quote(tree);
+    let script = format!(
+        "$transport={transport};$tree={tree};function Fail($m){{Write-Error $m;exit 1}};function Test-Part($x){{if($x.Length -eq 0 -or $x -eq '.' -or $x -eq '..'){{return $false}};if($x.EndsWith('.') -or $x.EndsWith(' ')){{return $false}};if($x -match '[\\*?\"<>|:]'){{return $false}};$stem=($x.Split('.')[0]).ToUpperInvariant();if(@('CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9') -contains $stem){{return $false}};return $true}};$json=[System.IO.File]::ReadAllText((Join-Path $transport 'manifest.json'),[System.Text.UTF8Encoding]::new($false));$m=$json|ConvertFrom-Json;if($m.format -ne 'winlane-workspace-transport' -or $m.version -ne 1){{Fail 'bad manifest format'}};$entries=@($m.entries);if($entries.Count -gt 10000){{Fail 'too many entries'}};$types=@{{}};$cases=@{{}};$blobs=@{{}};$fileCount=0;$totalBytes=[int64]0;foreach($e in $entries){{$p=[string]$e.path;if($p.Length -eq 0 -or [System.Text.Encoding]::UTF8.GetByteCount($p) -gt 255 -or $p.Contains('\\') -or $p.StartsWith('/') -or $p.StartsWith('\\')){{Fail 'bad path'}};foreach($ch in $p.ToCharArray()){{if([System.Char]::IsControl($ch)){{Fail 'control path'}}}};$parts=$p.Split('/');foreach($part in $parts){{if(-not (Test-Part $part)){{Fail 'bad component'}}}};if($types.ContainsKey($p)){{Fail 'duplicate path'}};$types[$p]=[string]$e.type;$lower=$p.ToLowerInvariant();if($cases.ContainsKey($lower)){{Fail 'case duplicate'}};$cases[$lower]=1;if($e.type -eq 'file'){{if($null -eq $e.PSObject.Properties['blob'] -or $null -eq $e.blob -or $null -eq $e.PSObject.Properties['size'] -or $null -eq $e.size -or $null -eq $e.PSObject.Properties['sha256'] -or $null -eq $e.sha256){{Fail 'missing file metadata'}};if([int64]$e.size -gt 268435456){{Fail 'file too large'}};if(([string]$e.sha256) -notmatch '^[0-9a-f]{{64}}$'){{Fail 'bad hash'}};$totalBytes += [int64]$e.size;if($totalBytes -gt 536870912){{Fail 'workspace too large'}};$b=[int]$e.blob;if($b -lt 0 -or $b -ge 10000 -or $blobs.ContainsKey($b)){{Fail 'bad blob'}};$blobs[$b]=1;$fileCount++}}elseif($e.type -ne 'directory'){{Fail 'bad type'}}}};if($blobs.Count -ne $fileCount){{Fail 'blob count'}};for($i=0;$i -lt $fileCount;$i++){{if(-not $blobs.ContainsKey($i)){{Fail 'blob indices'}}}};foreach($e in $entries){{$parts=([string]$e.path).Split('/');for($i=1;$i -lt $parts.Count;$i++){{$parent=($parts[0..($i-1)] -join '/');if(-not $types.ContainsKey($parent) -or $types[$parent] -ne 'directory'){{Fail 'bad parent'}}}}}};[System.IO.Directory]::CreateDirectory($tree)|Out-Null;$dirs=@($entries|Where-Object{{$_.type -eq 'directory'}}|Sort-Object{{([string]$_.path).Split('/').Count}},{{[string]$_.path}});foreach($e in $dirs){{$dest=Join-Path $tree ([string]$e.path);[System.IO.Directory]::CreateDirectory($dest)|Out-Null}};$files=@($entries|Where-Object{{$_.type -eq 'file'}}|Sort-Object{{[string]$_.path}});foreach($e in $files){{$rel=[string]$e.path;$b=[int]$e.blob;$src=Join-Path $transport ([System.String]::Format('blobs\\{{0:D6}}',$b));$dest=Join-Path $tree $rel;$parent=Split-Path -Parent $dest;if($parent){{[System.IO.Directory]::CreateDirectory($parent)|Out-Null}};if(Test-Path -LiteralPath $dest){{Fail 'destination conflict'}};[System.IO.File]::Move($src,$dest);$info=Get-Item -LiteralPath $dest;if($info.Length -ne [int64]$e.size){{Fail 'size mismatch'}};$hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash.ToLowerInvariant();if($hash -ne ([string]$e.sha256).ToLowerInvariant()){{Fail 'hash mismatch'}}}};exit 0"
+    );
+    let capture = run_powershell(control, &script, 600_000)?;
+    if capture.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(UiaError::Helper {
+            exit_code: capture.exit_code,
+            message: process_output_summary(&capture),
+        })
+    }
+}
+
 fn run_guest_tar<T: QgaTransport>(
     control: &mut BlockingUiaControl<T>,
     archive_path: &str,
@@ -501,9 +591,10 @@ fn guest_tar_script(archive_path: &str, target_dir: &str, extract: bool) -> UiaR
     let target_dir = ps_quote(target_dir);
     let tar = ps_quote(TAR_GUEST_PATH);
     let operation = if extract { "-x" } else { "-c" };
+    let format = if extract { "" } else { "--format ustar " };
     let member = if extract { "" } else { " '.'" };
     Ok(format!(
-        "$archiveDir={archive_dir};$archiveName={archive_name};$targetDir={target_dir};$code=1;Push-Location -LiteralPath $archiveDir;try{{& {tar} {operation} -f $archiveName -C $targetDir{member};$code=$LASTEXITCODE}}finally{{Pop-Location}};exit $code"
+        "$archiveDir={archive_dir};$archiveName={archive_name};$targetDir={target_dir};$code=1;New-Item -ItemType Directory -Force -Path $targetDir|Out-Null;Push-Location -LiteralPath $archiveDir;try{{& {tar} {format}{operation} -f $archiveName -C $targetDir{member};$code=$LASTEXITCODE}}finally{{Pop-Location}};exit $code"
     ))
 }
 
@@ -569,6 +660,9 @@ fn validate_guest_transfer_path(path: &str, workspace: bool) -> UiaResult<()> {
                     .unwrap_or(component)
                     .to_ascii_uppercase();
                 component.ends_with(['.', ' '])
+                    || component
+                        .chars()
+                        .any(|c| matches!(c, '*' | '?' | '"' | '<' | '>' | '|'))
                     || (component.contains(':') && !drive_component)
                     || matches!(
                         stem.as_str(),
@@ -781,10 +875,9 @@ struct SourceEntry {
     path: PathBuf,
     directory: bool,
     size: u64,
-    mtime: u64,
 }
 
-fn create_workspace_archive(source: &Path) -> UiaResult<(HostArchive, ArchiveStats)> {
+fn create_workspace_archive(source: &Path) -> UiaResult<(HostArchive, ArchiveStats, String)> {
     if !source.is_dir() {
         return Err(UiaError::HostCommand(
             "workspace host path is not a directory".to_owned(),
@@ -809,9 +902,67 @@ fn create_workspace_archive(source: &Path) -> UiaResult<(HostArchive, ArchiveSta
         .open(&archive.path)
         .map_err(|error| host_io(&archive.path, error))?;
     let mut writer = std::io::BufWriter::new(file);
-    for entry in &entries {
-        write_tar_entry(&mut writer, entry)?;
+    let mut manifest_entries = Vec::new();
+    for (blob_index, entry) in entries.iter().filter(|entry| !entry.directory).enumerate() {
+        let blob_index = blob_index as u64;
+        let name = blob_name(blob_index);
+        write_ustar_header(&mut writer, &name, false, entry.size, 0, b'0')?;
+        let mut input = File::open(&entry.path).map_err(|error| host_io(&entry.path, error))?;
+        let (bytes, sha256, grew) = copy_exact_with_hash(&mut input, &mut writer, entry.size)
+            .map_err(|error| host_io(&archive.path, error))?;
+        if bytes != entry.size || grew {
+            return Err(UiaError::MalformedArchive(
+                "source file changed while archiving".to_owned(),
+            ));
+        }
+        write_tar_padding(&mut writer, entry.size)
+            .map_err(|error| host_io(&archive.path, error))?;
+        manifest_entries.push((entry.relative.clone(), blob_index, entry.size, sha256));
     }
+    let mut manifest = TransportManifest {
+        format: "winlane-workspace-transport".to_owned(),
+        version: 1,
+        entries: Vec::new(),
+    };
+    let mut files = std::collections::HashMap::new();
+    for (path, blob, size, sha256) in manifest_entries {
+        files.insert(path, (blob, size, sha256));
+    }
+    for entry in &entries {
+        if entry.directory {
+            manifest.entries.push(TransportEntry {
+                path: entry.relative.clone(),
+                entry_type: "directory".to_owned(),
+                blob: None,
+                size: None,
+                sha256: None,
+            });
+        } else {
+            let (blob, size, sha256) = files[&entry.relative].clone();
+            manifest.entries.push(TransportEntry {
+                path: entry.relative.clone(),
+                entry_type: "file".to_owned(),
+                blob: Some(blob),
+                size: Some(size),
+                sha256: Some(sha256),
+            });
+        }
+    }
+    validate_transport_manifest(&manifest, ArchiveLimits::default())?;
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    write_ustar_header(
+        &mut writer,
+        "manifest.json",
+        false,
+        manifest_bytes.len() as u64,
+        0,
+        b'0',
+    )?;
+    writer
+        .write_all(&manifest_bytes)
+        .map_err(|error| host_io(&archive.path, error))?;
+    write_tar_padding(&mut writer, manifest_bytes.len() as u64)
+        .map_err(|error| host_io(&archive.path, error))?;
     writer
         .write_all(&[0_u8; TAR_BLOCK_BYTES * 2])
         .map_err(|error| host_io(&archive.path, error))?;
@@ -827,13 +978,329 @@ fn create_workspace_archive(source: &Path) -> UiaResult<(HostArchive, ArchiveSta
             maximum: MAX_WORKSPACE_ARCHIVE_BYTES,
         });
     }
+    let logical_sha256 = canonical_manifest_hash(&manifest);
     Ok((
         archive,
         ArchiveStats {
             members: entries.len() as u64,
             file_bytes,
         },
+        logical_sha256,
     ))
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_manifest_path(path: &str, max_path_bytes: usize) -> UiaResult<()> {
+    if path.is_empty()
+        || path.len() > max_path_bytes
+        || path.starts_with(['/', '\\'])
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+    {
+        return Err(UiaError::UnsafeArchiveEntry(path.to_owned()));
+    }
+    let components = path.split('/').collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+    {
+        return Err(UiaError::UnsafeArchiveEntry(path.to_owned()));
+    }
+    for component in components {
+        validate_member_component(component)?;
+    }
+    Ok(())
+}
+
+fn validate_transport_manifest(
+    manifest: &TransportManifest,
+    limits: ArchiveLimits,
+) -> UiaResult<u64> {
+    if manifest.format != "winlane-workspace-transport" || manifest.version != 1 {
+        return Err(malformed("unsupported workspace transport manifest"));
+    }
+    if manifest.entries.len() as u64 > limits.max_members {
+        return Err(UiaError::TooManyMembers {
+            maximum: limits.max_members,
+        });
+    }
+    let mut exact = HashSet::new();
+    let mut casefold = HashSet::new();
+    let mut types = std::collections::HashMap::new();
+    let mut blobs = Vec::new();
+    let mut file_bytes = 0_u64;
+    for entry in &manifest.entries {
+        validate_manifest_path(&entry.path, limits.max_path_bytes)?;
+        if !exact.insert(entry.path.clone()) || !casefold.insert(entry.path.to_lowercase()) {
+            return Err(UiaError::UnsafeArchiveEntry(format!(
+                "duplicate manifest path {}",
+                entry.path
+            )));
+        }
+        match entry.entry_type.as_str() {
+            "directory" => {
+                if entry.blob.is_some() || entry.size.is_some() || entry.sha256.is_some() {
+                    return Err(malformed("directory entry carries file metadata"));
+                }
+            }
+            "file" => {
+                let blob = entry
+                    .blob
+                    .ok_or_else(|| malformed("file entry missing blob"))?;
+                let size = entry
+                    .size
+                    .ok_or_else(|| malformed("file entry missing size"))?;
+                let sha256 = entry
+                    .sha256
+                    .as_deref()
+                    .ok_or_else(|| malformed("file entry missing sha256"))?;
+                if size > limits.max_member_bytes {
+                    return Err(UiaError::MemberTooLarge {
+                        actual: size,
+                        maximum: limits.max_member_bytes,
+                    });
+                }
+                if !valid_sha256_hex(sha256) {
+                    return Err(malformed("file entry sha256 is invalid"));
+                }
+                file_bytes = file_bytes
+                    .checked_add(size)
+                    .ok_or(UiaError::TransferTooLarge {
+                        actual: u64::MAX,
+                        maximum: limits.max_total_bytes,
+                    })?;
+                if file_bytes > limits.max_total_bytes {
+                    return Err(UiaError::TransferTooLarge {
+                        actual: file_bytes,
+                        maximum: limits.max_total_bytes,
+                    });
+                }
+                blobs.push(blob);
+            }
+            _ => return Err(malformed("manifest entry type is unsupported")),
+        }
+        types.insert(entry.path.clone(), entry.entry_type.clone());
+    }
+    blobs.sort_unstable();
+    if blobs
+        .iter()
+        .enumerate()
+        .any(|(index, blob)| *blob != index as u64)
+    {
+        return Err(malformed(
+            "manifest blob indices are not contiguous and unique",
+        ));
+    }
+    for entry in &manifest.entries {
+        let mut prefix = String::new();
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        for component in &components[..components.len() - 1] {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            match types.get(&prefix).map(String::as_str) {
+                Some("directory") => {}
+                Some("file") => return Err(malformed("file entry is used as a parent path")),
+                _ => return Err(malformed("manifest parent directory entry is missing")),
+            }
+        }
+    }
+    Ok(file_bytes)
+}
+
+fn blob_name(index: u64) -> String {
+    format!("blobs/{index:06}")
+}
+
+fn copy_with_hash(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+) -> std::io::Result<(u64, String)> {
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 128 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+        total += count as u64;
+    }
+    writer.flush()?;
+    Ok((total, hex_digest(hasher)))
+}
+
+fn copy_exact_with_hash(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    expected: u64,
+) -> std::io::Result<(u64, String, bool)> {
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 128 * 1024];
+    while total < expected {
+        let wanted = (expected - total).min(buffer.len() as u64) as usize;
+        let count = reader.read(&mut buffer[..wanted])?;
+        if count == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+        total += count as u64;
+    }
+    writer.flush()?;
+    let mut extra = [0_u8; 1];
+    let grew = total == expected && reader.read(&mut extra)? != 0;
+    Ok((total, hex_digest(hasher), grew))
+}
+
+fn canonical_manifest_hash(manifest: &TransportManifest) -> String {
+    let mut entries = manifest.entries.clone();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut hasher = Sha256::new();
+    hasher.update(b"winlane-workspace-transport-v1\0");
+    for entry in entries {
+        let size;
+        let fields = [
+            entry.entry_type.as_str(),
+            entry.path.as_str(),
+            if entry.entry_type == "file" {
+                size = entry.size.unwrap_or(0).to_string();
+                size.as_str()
+            } else {
+                ""
+            },
+            entry.sha256.as_deref().unwrap_or(""),
+        ];
+        for field in fields {
+            hasher.update((field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
+    }
+    hex_digest(hasher)
+}
+
+fn read_transport_manifest(transport: &Path) -> UiaResult<(TransportManifest, u64)> {
+    let path = transport.join("manifest.json");
+    let bytes = fs::read(&path).map_err(|error| host_io(&path, error))?;
+    if bytes.len() as u64 > MAX_TRANSPORT_MANIFEST_BYTES {
+        return Err(UiaError::MalformedArchive(
+            "workspace manifest exceeds size limit".to_owned(),
+        ));
+    }
+    let manifest: TransportManifest = serde_json::from_slice(&bytes)?;
+    let file_bytes = validate_transport_manifest(&manifest, ArchiveLimits::default())?;
+    Ok((manifest, file_bytes))
+}
+
+fn materialize_transport(transport: &Path, target: &Path) -> UiaResult<(TransportManifest, u64)> {
+    let (manifest, file_bytes) = read_transport_manifest(transport)?;
+    let mut entries = manifest.entries.clone();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.entry_type == "directory")
+    {
+        let path = target.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        fs::create_dir(&path).map_err(|error| host_io(&path, error))?;
+    }
+    for entry in entries.iter().filter(|entry| entry.entry_type == "file") {
+        let relative = entry.path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let output_path = target.join(&relative);
+        let input_path = transport.join(blob_name(entry.blob.unwrap_or(0)));
+        let mut input = File::open(&input_path).map_err(|error| host_io(&input_path, error))?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .map_err(|error| host_io(&output_path, error))?;
+        let copy_result =
+            copy_with_hash(&mut input, &mut output).map_err(|error| host_io(&output_path, error));
+        let (bytes, sha256) = match copy_result {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_file(&output_path);
+                return Err(error);
+            }
+        };
+        if bytes != entry.size.unwrap_or(u64::MAX)
+            || sha256 != entry.sha256.as_deref().unwrap_or("")
+        {
+            let _ = fs::remove_file(&output_path);
+            return Err(UiaError::TransferVerificationFailed);
+        }
+    }
+    Ok((manifest, file_bytes))
+}
+
+fn validate_transport_layout(transport: &Path, manifest: &TransportManifest) -> UiaResult<()> {
+    let mut expected = HashSet::from(["manifest.json".to_owned()]);
+    for entry in &manifest.entries {
+        if entry.entry_type == "file" {
+            expected.insert(blob_name(entry.blob.unwrap_or(0)));
+        }
+    }
+    let mut actual_files = Vec::new();
+    let mut actual_dirs = Vec::new();
+    fn collect(
+        directory: &Path,
+        prefix: &str,
+        files: &mut Vec<String>,
+        dirs: &mut Vec<String>,
+    ) -> UiaResult<()> {
+        for child in fs::read_dir(directory).map_err(|error| host_io(directory, error))? {
+            let child = child.map_err(|error| host_io(directory, error))?;
+            let name = child
+                .file_name()
+                .to_str()
+                .ok_or_else(|| malformed("transport member is not UTF-8"))?
+                .to_owned();
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let metadata = fs::symlink_metadata(child.path())
+                .map_err(|error| host_io(&child.path(), error))?;
+            if metadata.is_dir() {
+                dirs.push(relative.clone());
+                collect(&child.path(), &relative, files, dirs)?;
+            } else if metadata.is_file() {
+                files.push(relative);
+            } else {
+                return Err(UiaError::UnsafeArchiveEntry(relative));
+            }
+        }
+        Ok(())
+    }
+    collect(transport, "", &mut actual_files, &mut actual_dirs)?;
+    for directory in actual_dirs {
+        if directory != "blobs" {
+            return Err(UiaError::UnsafeArchiveEntry(format!(
+                "unexpected transport directory {directory}"
+            )));
+        }
+    }
+    for path in actual_files {
+        if !expected.remove(&path) {
+            return Err(UiaError::UnsafeArchiveEntry(format!(
+                "unexpected transport member {path}"
+            )));
+        }
+    }
+    if !expected.is_empty() {
+        return Err(malformed("transport members do not match manifest blobs"));
+    }
+    Ok(())
 }
 
 fn collect_source_entries(
@@ -895,12 +1362,6 @@ fn collect_source_entries(
                 maximum: limits.max_total_bytes,
             });
         }
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
         // Conservative Windows collision key: Unicode lowercase over the normalized `/` path.
         if !case_keys.insert(relative.to_lowercase()) {
             return Err(UiaError::UnsafeArchiveEntry(format!(
@@ -912,7 +1373,6 @@ fn collect_source_entries(
             path: path.clone(),
             directory: directory_entry,
             size,
-            mtime,
         });
         if directory_entry {
             collect_source_entries(&path, &relative, entries, file_bytes, case_keys, limits)?;
@@ -960,134 +1420,6 @@ fn validate_member_component(name: &str) -> UiaResult<()> {
     } else {
         Ok(())
     }
-}
-
-fn write_tar_entry(writer: &mut impl Write, entry: &SourceEntry) -> UiaResult<()> {
-    write_tar_header(
-        writer,
-        &entry.relative,
-        entry.directory,
-        entry.size,
-        entry.mtime,
-    )?;
-    if entry.directory {
-        return Ok(());
-    }
-    let mut input = File::open(&entry.path).map_err(|error| host_io(&entry.path, error))?;
-    let mut remaining = entry.size;
-    let mut buffer = vec![0_u8; 128 * 1024];
-    while remaining > 0 {
-        let wanted = remaining.min(buffer.len() as u64) as usize;
-        let count = input
-            .read(&mut buffer[..wanted])
-            .map_err(|error| host_io(&entry.path, error))?;
-        if count == 0 {
-            return Err(UiaError::MalformedArchive(
-                "source file changed while archiving".to_owned(),
-            ));
-        }
-        writer
-            .write_all(&buffer[..count])
-            .map_err(|error| host_io(&entry.path, error))?;
-        remaining -= count as u64;
-    }
-    let mut extra = [0_u8; 1];
-    if input
-        .read(&mut extra)
-        .map_err(|error| host_io(&entry.path, error))?
-        != 0
-    {
-        return Err(UiaError::MalformedArchive(
-            "source file changed while archiving".to_owned(),
-        ));
-    }
-    write_tar_padding(writer, entry.size).map_err(|error| host_io(&entry.path, error))?;
-    Ok(())
-}
-
-fn write_tar_header(
-    writer: &mut impl Write,
-    path: &str,
-    directory: bool,
-    size: u64,
-    mtime: u64,
-) -> UiaResult<()> {
-    let path = if directory {
-        format!("{path}/")
-    } else {
-        path.to_owned()
-    };
-    let needs_pax = !path.is_ascii() || split_ustar_path(&path).is_none();
-    let ustar_path = if needs_pax {
-        write_pax_path_header(writer, &path, mtime)?;
-        if split_ustar_path(&path).is_some() {
-            path.clone()
-        } else {
-            fallback_ustar_path(&path, directory)
-        }
-    } else {
-        path.clone()
-    };
-    write_ustar_header(
-        writer,
-        &ustar_path,
-        directory,
-        size,
-        mtime,
-        if directory { b'5' } else { b'0' },
-    )
-}
-
-fn write_pax_path_header(writer: &mut impl Write, path: &str, mtime: u64) -> UiaResult<()> {
-    let record = pax_record("path", path);
-    write_ustar_header(
-        writer,
-        &pax_header_name(path),
-        false,
-        record.len() as u64,
-        mtime,
-        b'x',
-    )?;
-    writer
-        .write_all(&record)
-        .map_err(|error| UiaError::HostIo {
-            path: "workspace archive".to_owned(),
-            source: error,
-        })?;
-    write_tar_padding(writer, record.len() as u64).map_err(|error| UiaError::HostIo {
-        path: "workspace archive".to_owned(),
-        source: error,
-    })
-}
-
-fn pax_record(key: &str, value: &str) -> Vec<u8> {
-    let mut digits = 1_usize;
-    loop {
-        let length = digits + 1 + key.len() + 1 + value.len() + 1;
-        let actual_digits = length.to_string().len();
-        if actual_digits == digits {
-            return format!("{length} {key}={value}\n").into_bytes();
-        }
-        digits = actual_digits;
-    }
-}
-
-fn archive_path_digest(path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.as_bytes());
-    hex_digest(hasher)[..16].to_owned()
-}
-
-fn pax_header_name(path: &str) -> String {
-    format!("PaxHeader/winlane-{}", archive_path_digest(path))
-}
-
-fn fallback_ustar_path(path: &str, directory: bool) -> String {
-    let mut fallback = format!("winlane-path-{}", archive_path_digest(path));
-    if directory {
-        fallback.push('/');
-    }
-    fallback
 }
 
 fn write_ustar_header(
@@ -1182,8 +1514,6 @@ fn extract_tar(
     let mut members = 0_u64;
     let mut file_bytes = 0_u64;
     let mut seen = HashSet::new();
-    let mut pending_path = None;
-    let mut pending_size = None;
     loop {
         let mut block = [0_u8; TAR_BLOCK_BYTES];
         read_exact_archive(&mut reader, &mut block)?;
@@ -1201,37 +1531,9 @@ fn extract_tar(
         }
         let header = parse_tar_header(&block)?;
         match header.typeflag {
-            b'x' => {
-                if header.size > MAX_PAX_HEADER_BYTES {
-                    return Err(malformed("pax header exceeds size limit"));
-                }
-                let data = read_tar_data_vec(&mut reader, header.size)?;
-                let (path, size) = parse_pax_header(&data)?;
-                if path.is_some() {
-                    pending_path = path;
-                }
-                if size.is_some() {
-                    pending_size = size;
-                }
-            }
-            b'L' => {
-                if header.size as usize > limits.max_path_bytes + 1 {
-                    return Err(malformed("long path entry exceeds size limit"));
-                }
-                let data = read_tar_data_vec(&mut reader, header.size)?;
-                let end = data
-                    .iter()
-                    .position(|byte| *byte == 0)
-                    .unwrap_or(data.len());
-                let path = std::str::from_utf8(&data[..end])
-                    .map_err(|_| malformed("long path is not UTF-8"))?
-                    .trim_end_matches('\n')
-                    .to_owned();
-                pending_path = Some(path);
-            }
             b'0' | 0 | b'5' => {
-                let path = pending_path.take().unwrap_or(header.path);
-                let size = pending_size.take().unwrap_or(header.size);
+                let path = header.path;
+                let size = header.size;
                 let Some(relative) = normalize_archive_path(&path, limits.max_path_bytes)? else {
                     skip_tar_data(&mut reader, size)?;
                     continue;
@@ -1408,81 +1710,32 @@ fn parse_octal(field: &[u8]) -> Option<u64> {
     Some(value)
 }
 
-fn parse_pax_header(data: &[u8]) -> UiaResult<(Option<String>, Option<u64>)> {
-    let mut position = 0_usize;
-    let mut path = None;
-    let mut size = None;
-    while position < data.len() {
-        let space_offset = data[position..]
-            .iter()
-            .position(|byte| *byte == b' ')
-            .ok_or_else(|| malformed("pax record missing length separator"))?;
-        let length_text = std::str::from_utf8(&data[position..position + space_offset])
-            .map_err(|_| malformed("pax length is not ASCII"))?;
-        let length = length_text
-            .parse::<usize>()
-            .map_err(|_| malformed("pax length is invalid"))?;
-        if length == 0 || position + length > data.len() || length <= space_offset + 2 {
-            return Err(malformed("pax record length is invalid"));
-        }
-        let end = position + length;
-        if data[end - 1] != b'\n' {
-            return Err(malformed("pax record is not newline terminated"));
-        }
-        let record = &data[position + space_offset + 1..end - 1];
-        let equals = record
-            .iter()
-            .position(|byte| *byte == b'=')
-            .ok_or_else(|| malformed("pax record missing key separator"))?;
-        let key = &record[..equals];
-        let value = &record[equals + 1..];
-        if key == b"path" {
-            path = Some(
-                std::str::from_utf8(value)
-                    .map_err(|_| malformed("pax path is not UTF-8"))?
-                    .to_owned(),
-            );
-        } else if key == b"size" {
-            let text =
-                std::str::from_utf8(value).map_err(|_| malformed("pax size is not ASCII"))?;
-            size = Some(
-                text.parse::<u64>()
-                    .map_err(|_| malformed("pax size is invalid"))?,
-            );
-        }
-        position = end;
-    }
-    Ok((path, size))
-}
-
 fn read_exact_archive(reader: &mut impl Read, buffer: &mut [u8]) -> UiaResult<()> {
     reader
         .read_exact(buffer)
         .map_err(|_| malformed("archive is truncated"))
 }
 
-fn read_tar_data_vec(reader: &mut impl Read, size: u64) -> UiaResult<Vec<u8>> {
-    let mut data = vec![0_u8; size as usize];
-    read_exact_archive(reader, &mut data)?;
-    skip_tar_padding(reader, size)?;
-    Ok(data)
-}
-
 fn copy_exact_archive(
     reader: &mut impl Read,
-    output: &mut File,
+    writer: &mut impl Write,
     size: u64,
-    output_path: &Path,
+    path: &Path,
 ) -> UiaResult<()> {
     let mut remaining = size;
     let mut buffer = vec![0_u8; 128 * 1024];
     while remaining > 0 {
         let wanted = remaining.min(buffer.len() as u64) as usize;
-        read_exact_archive(reader, &mut buffer[..wanted])?;
-        output
-            .write_all(&buffer[..wanted])
-            .map_err(|error| host_io(output_path, error))?;
-        remaining -= wanted as u64;
+        let count = reader
+            .read(&mut buffer[..wanted])
+            .map_err(|error| host_io(path, error))?;
+        if count == 0 {
+            return Err(malformed("archive is truncated"));
+        }
+        writer
+            .write_all(&buffer[..count])
+            .map_err(|error| host_io(path, error))?;
+        remaining -= count as u64;
     }
     Ok(())
 }
@@ -1702,6 +1955,23 @@ mod tests {
         bytes
     }
 
+    fn tar_header_names(bytes: &[u8]) -> Vec<(String, u8)> {
+        let mut output = Vec::new();
+        let mut offset = 0_usize;
+        loop {
+            let end = offset + TAR_BLOCK_BYTES;
+            assert!(end <= bytes.len());
+            let block: &[u8; TAR_BLOCK_BYTES] = bytes[offset..end].try_into().unwrap();
+            if block.iter().all(|byte| *byte == 0) {
+                break;
+            }
+            let header = parse_tar_header(block).unwrap();
+            output.push((header.path.clone(), header.typeflag));
+            offset = end + (header.size as usize).div_ceil(TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+        }
+        output
+    }
+
     struct RecordingTransport {
         incoming: std::collections::VecDeque<Vec<u8>>,
         written: std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>,
@@ -1801,22 +2071,224 @@ mod tests {
         );
     }
 
+    fn transport_file(path: &str, blob: u64, size: u64, sha256: &str) -> TransportEntry {
+        TransportEntry {
+            path: path.to_owned(),
+            entry_type: "file".to_owned(),
+            blob: Some(blob),
+            size: Some(size),
+            sha256: Some(sha256.to_owned()),
+        }
+    }
+
+    fn transport_dir(path: &str) -> TransportEntry {
+        TransportEntry {
+            path: path.to_owned(),
+            entry_type: "directory".to_owned(),
+            blob: None,
+            size: None,
+            sha256: None,
+        }
+    }
+
+    fn transport_manifest(entries: Vec<TransportEntry>) -> TransportManifest {
+        TransportManifest {
+            format: "winlane-workspace-transport".to_owned(),
+            version: 1,
+            entries,
+        }
+    }
+
     #[test]
-    fn workspace_archive_round_trip_preserves_files_and_directories() {
+    fn manifest_validation_rejects_malformed_paths_and_conflicts() {
+        let digest = "a".repeat(64);
+        for path in [
+            "../evil",
+            "/absolute",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "a\\b",
+            "control\u{1}",
+            "a/CON",
+            "a/com1.txt",
+            "a/trailing.",
+            "a/trailing ",
+            "a/file.txt:stream",
+            "a/bad*name",
+            "a/bad?name",
+            "a/bad<name",
+            "a/bad>name",
+            "a/bad|name",
+        ] {
+            let manifest = transport_manifest(vec![transport_file(path, 0, 1, &digest)]);
+            assert!(
+                validate_transport_manifest(&manifest, ArchiveLimits::default()).is_err(),
+                "{path}"
+            );
+        }
+
+        let duplicate = transport_manifest(vec![
+            transport_file("a.txt", 0, 1, &digest),
+            transport_file("a.txt", 1, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&duplicate, ArchiveLimits::default()).is_err());
+        let case_duplicate = transport_manifest(vec![
+            transport_file("A.txt", 0, 1, &digest),
+            transport_file("a.TXT", 1, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&case_duplicate, ArchiveLimits::default()).is_err());
+        let file_parent = transport_manifest(vec![
+            transport_file("a", 0, 1, &digest),
+            transport_file("a/b", 1, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&file_parent, ArchiveLimits::default()).is_err());
+        let missing_parent = transport_manifest(vec![transport_file("a/b", 0, 1, &digest)]);
+        assert!(validate_transport_manifest(&missing_parent, ArchiveLimits::default()).is_err());
+        let valid = transport_manifest(vec![
+            transport_dir("a"),
+            transport_file("a/b", 0, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&valid, ArchiveLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn manifest_validation_rejects_bad_file_metadata_and_blob_indices() {
+        let digest = "a".repeat(64);
+        for file in [
+            transport_file("a", 1, 1, &digest),
+            transport_file("a", 0, 1, "bad"),
+        ] {
+            let manifest = transport_manifest(vec![file]);
+            assert!(validate_transport_manifest(&manifest, ArchiveLimits::default()).is_err());
+        }
+        let duplicate_blob = transport_manifest(vec![
+            transport_file("a", 0, 1, &digest),
+            transport_file("b", 0, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&duplicate_blob, ArchiveLimits::default()).is_err());
+        let missing_blob_zero = transport_manifest(vec![
+            transport_file("a", 1, 1, &digest),
+            transport_file("b", 2, 1, &digest),
+        ]);
+        assert!(validate_transport_manifest(&missing_blob_zero, ArchiveLimits::default()).is_err());
+        let mut directory_metadata = transport_dir("a");
+        directory_metadata.size = Some(0);
+        assert!(
+            validate_transport_manifest(
+                &transport_manifest(vec![directory_metadata]),
+                ArchiveLimits::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_manifest_hash_ignores_order_and_uses_logical_semantics() {
+        let digest = "a".repeat(64);
+        let first = transport_manifest(vec![
+            transport_dir("a"),
+            transport_file("a/b", 0, 1, &digest),
+        ]);
+        let second = transport_manifest(vec![
+            transport_file("a/b", 7, 1, &digest),
+            transport_dir("a"),
+        ]);
+        assert_eq!(
+            canonical_manifest_hash(&first),
+            canonical_manifest_hash(&second)
+        );
+        let changed_size = transport_manifest(vec![
+            transport_dir("a"),
+            transport_file("a/b", 0, 2, &digest),
+        ]);
+        assert_ne!(
+            canonical_manifest_hash(&first),
+            canonical_manifest_hash(&changed_size)
+        );
+    }
+
+    #[test]
+    fn materialize_transport_rejects_hash_size_mismatch() {
+        let digest = "a".repeat(64);
+        for (content, size, hash) in [
+            (b"abc".as_slice(), 2, digest.as_str()),
+            (b"abc".as_slice(), 3, digest.as_str()),
+        ] {
+            let temp = TestTempDir::new();
+            let transport = temp.path.join("transport");
+            let target = temp.path.join("target");
+            fs::create_dir_all(transport.join("blobs")).unwrap();
+            fs::create_dir(&target).unwrap();
+            fs::write(transport.join("blobs/000000"), content).unwrap();
+            let manifest = transport_manifest(vec![transport_file("file", 0, size, hash)]);
+            fs::write(
+                transport.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(materialize_transport(&transport, &target).is_err());
+            assert!(!target.join("file").exists());
+        }
+    }
+
+    #[test]
+    fn powershell_transport_scripts_are_ascii_and_utf8_manifest_based() {
+        let source = include_str!("transfer.rs");
+        let export_start = source.find("fn run_guest_export_transport").unwrap();
+        let materialize_start = source.find("fn run_guest_materialize").unwrap();
+        let materialize_end = source[materialize_start..]
+            .find("fn run_guest_tar")
+            .unwrap()
+            + materialize_start;
+        assert!(source[export_start..materialize_start].is_ascii());
+        assert!(source[materialize_start..materialize_end].is_ascii());
+        assert!(source[export_start..materialize_start].contains("UTF8Encoding]::new($false)"));
+        assert!(source[materialize_start..materialize_end].contains("UTF8Encoding]::new($false)"));
+        assert!(source[materialize_start..materialize_end].contains("bad parent"));
+        assert!(source[materialize_start..materialize_end].contains("hash mismatch"));
+        let script = guest_tar_script(
+            r"C:\Windows\Temp\a.tar",
+            r"C:\Windows\Temp\transport",
+            false,
+        )
+        .unwrap();
+        assert!(script.contains("--format ustar"));
+        let script =
+            guest_tar_script(r"C:\Windows\Temp\a.tar", r"C:\Windows\Temp\transport", true).unwrap();
+        assert!(!script.contains("--format ustar"));
+    }
+
+    #[test]
+    fn workspace_archive_transport_round_trip_preserves_empty_dirs() {
         let temp = TestTempDir::new();
         let source = temp.path.join("source");
         fs::create_dir_all(source.join("alpha/nested")).unwrap();
         fs::create_dir_all(source.join("empty-dir")).unwrap();
         fs::write(source.join("alpha/nested/data.bin"), b"data").unwrap();
         fs::write(source.join("empty.txt"), b"").unwrap();
-        let (archive, stats) = create_workspace_archive(&source).unwrap();
+        let (archive, stats, logical_sha256) = create_workspace_archive(&source).unwrap();
         assert_eq!(stats.members, 5);
         assert_eq!(stats.file_bytes, 4);
+        assert_eq!(logical_sha256.len(), 64);
+        let bytes = fs::read(&archive.path).unwrap();
+        assert_eq!(&bytes[0..12], b"blobs/000000");
+        assert_eq!(bytes[156], b'0');
+        let names = tar_header_names(&bytes);
+        assert!(names.iter().all(|(name, _)| name.is_ascii()));
+        assert!(!names.iter().any(|(name, _)| name.contains("alpha")));
+
         let target = temp.path.join("target");
         fs::create_dir(&target).unwrap();
-        let extracted =
-            extract_workspace_archive(&archive.path, &target, ArchiveLimits::default()).unwrap();
-        assert_eq!(extracted.members, stats.members);
+        let transport = temp.path.join("transport");
+        fs::create_dir(&transport).unwrap();
+        extract_workspace_archive(&archive.path, &transport, ArchiveLimits::default()).unwrap();
+        let (probe, _) = read_transport_manifest(&transport).unwrap();
+        validate_transport_layout(&transport, &probe).unwrap();
+        let (manifest, file_bytes) = materialize_transport(&transport, &target).unwrap();
+        assert_eq!(file_bytes, stats.file_bytes);
+        assert_eq!(manifest.entries.len() as u64, stats.members);
+        assert_eq!(canonical_manifest_hash(&manifest), logical_sha256);
         assert_eq!(
             fs::read(target.join("alpha/nested/data.bin")).unwrap(),
             b"data"
@@ -1826,22 +2298,29 @@ mod tests {
     }
 
     #[test]
-    fn workspace_archive_unicode_names_use_pax_and_round_trip() {
+    fn workspace_archive_unicode_non_bmp_names_round_trip_as_manifest_data() {
         let temp = TestTempDir::new();
         let source = temp.path.join("source");
         let unicode_dir = source.join("unicode-é");
         fs::create_dir_all(&unicode_dir).unwrap();
         fs::write(unicode_dir.join("日程🙂.txt"), "unicode content".as_bytes()).unwrap();
-        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let (archive, stats, logical_sha256) = create_workspace_archive(&source).unwrap();
+        assert_eq!(stats.members, 2);
         let bytes = fs::read(&archive.path).unwrap();
-        assert_eq!(bytes[156], b'x');
-        let text = String::from_utf8_lossy(&bytes);
-        assert!(text.contains("path=unicode-é/"));
-        assert!(text.contains("path=unicode-é/日程🙂.txt"));
+        let names = tar_header_names(&bytes);
+        assert!(names.iter().all(|(name, _)| name.is_ascii()));
+        assert!(names.iter().all(|(_, typeflag)| *typeflag == b'0'));
+        assert!(String::from_utf8_lossy(&bytes).contains("unicode-é/日程🙂.txt"));
 
         let target = temp.path.join("target");
         fs::create_dir(&target).unwrap();
-        extract_workspace_archive(&archive.path, &target, ArchiveLimits::default()).unwrap();
+        let transport = temp.path.join("transport");
+        fs::create_dir(&transport).unwrap();
+        extract_workspace_archive(&archive.path, &transport, ArchiveLimits::default()).unwrap();
+        let (probe, _) = read_transport_manifest(&transport).unwrap();
+        validate_transport_layout(&transport, &probe).unwrap();
+        let (manifest, _) = materialize_transport(&transport, &target).unwrap();
+        assert_eq!(canonical_manifest_hash(&manifest), logical_sha256);
         assert_eq!(
             fs::read(target.join("unicode-é/日程🙂.txt")).unwrap(),
             b"unicode content"
@@ -1849,50 +2328,40 @@ mod tests {
     }
 
     #[test]
-    fn workspace_archive_unrepresentable_long_name_uses_pax_and_round_trips() {
+    fn workspace_archive_long_name_round_trips_without_long_tar_names() {
         let temp = TestTempDir::new();
         let source = temp.path.join("source");
         fs::create_dir(&source).unwrap();
         let name = "a".repeat(120);
         fs::write(source.join(&name), b"long").unwrap();
-        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let (archive, _, _) = create_workspace_archive(&source).unwrap();
         let bytes = fs::read(&archive.path).unwrap();
-        assert_eq!(bytes[156], b'x');
-        assert!(String::from_utf8_lossy(&bytes).contains("winlane-path-"));
+        let names = tar_header_names(&bytes);
+        assert!(names.iter().all(|(name, _)| name.len() <= 32));
+        assert!(!names.iter().any(|(name, _)| name.contains("aaaa")));
 
         let target = temp.path.join("target");
         fs::create_dir(&target).unwrap();
-        extract_workspace_archive(&archive.path, &target, ArchiveLimits::default()).unwrap();
+        let transport = temp.path.join("transport");
+        fs::create_dir(&transport).unwrap();
+        extract_workspace_archive(&archive.path, &transport, ArchiveLimits::default()).unwrap();
+        let (probe, _) = read_transport_manifest(&transport).unwrap();
+        validate_transport_layout(&transport, &probe).unwrap();
+        materialize_transport(&transport, &target).unwrap();
         assert_eq!(fs::read(target.join(name)).unwrap(), b"long");
     }
 
     #[test]
-    fn workspace_archive_ascii_representable_name_stays_plain_ustar() {
+    fn workspace_archive_transport_members_are_ascii_only() {
         let temp = TestTempDir::new();
         let source = temp.path.join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("ascii.txt"), b"ascii").unwrap();
-        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let (archive, _, _) = create_workspace_archive(&source).unwrap();
         let bytes = fs::read(&archive.path).unwrap();
-        assert_eq!(bytes[156], b'0');
-        assert!(
-            !bytes
-                .windows(b"PaxHeader".len())
-                .any(|window| window == b"PaxHeader")
-        );
-    }
-
-    #[test]
-    fn archive_extraction_uses_utf8_pax_path() {
-        let temp = TestTempDir::new();
-        let target = temp.path.join("target");
-        fs::create_dir(&target).unwrap();
-        let pax = pax_record("path", "unicode-é/雪.txt");
-        let mut archive = make_archive_entry("PaxHeader/test", b'x', &pax);
-        archive.extend(make_archive_entry("winlane-path-fallback", b'0', b"data"));
-        let archive = finish_archive(archive);
-        extract_bytes(&archive, &target).unwrap();
-        assert_eq!(fs::read(target.join("unicode-é/雪.txt")).unwrap(), b"data");
+        let names = tar_header_names(&bytes);
+        assert!(names.iter().all(|(name, _)| name.is_ascii()));
+        assert!(!names.iter().any(|(name, _)| name.contains("ascii.txt")));
     }
 
     #[cfg(unix)]
@@ -2081,9 +2550,10 @@ mod tests {
         ));
         assert!(source.contains("New-Item -ItemType Directory -Force -Path $staging"));
         assert!(source.contains("[System.IO.FileAttributes]::ReparsePoint"));
+        assert!(source.contains("function Has-Reparse($dir)"));
+        assert!(source.contains("if(Has-Reparse $target){exit 5}"));
         assert!(
-            source
-                .contains("Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue")
+            source.contains("Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop")
         );
     }
 
@@ -2106,6 +2576,11 @@ mod tests {
             r"C:\workspace\CON",
             r"C:\workspace\com1.txt",
             r"C:\workspace\file.txt:stream",
+            r"C:\workspace\bad*name",
+            r"C:\workspace\bad?name",
+            r"C:\workspace\bad<name",
+            r"C:\workspace\bad>name",
+            r"C:\workspace\bad|name",
         ] {
             assert!(validate_guest_transfer_path(path, false).is_err());
         }
