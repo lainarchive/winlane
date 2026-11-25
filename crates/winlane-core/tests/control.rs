@@ -1,5 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use std::os::unix::fs::PermissionsExt;
 use winlane_contracts::{
     BootMode, ControlEvent, CpuArch, MachineSpec, MachineState, MouseButton, NetworkMode,
     ScrollDirection,
@@ -11,6 +13,86 @@ fn fixture(name: &str) -> PathBuf {
         .join("../..")
         .join("tests/fixtures/control")
         .join(name)
+}
+
+fn delayed_quit_fixture(root: &Path) -> PathBuf {
+    let source =
+        std::fs::read_to_string(fixture("fake_qemu_system.py")).expect("read fake qemu fixture");
+    let patched = source
+        .replace(
+            "connection.close()\n                    delayed_exit(0)",
+            "connection.close()\n                    server.close()\n                    threading.Thread(target=delayed_exit, args=(2.0,), daemon=False).start()",
+        );
+    assert_ne!(patched, source);
+    let path = root.join("fake_qemu_delayed_quit.py");
+    std::fs::write(&path, patched).expect("write delayed quit fixture");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("fixture metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("fixture permissions");
+    path
+}
+
+fn write_executable_fixture(root: &Path, name: &str, contents: String) -> PathBuf {
+    let path = root.join(name);
+    std::fs::write(&path, contents).expect("write qemu fixture");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("fixture metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("fixture permissions");
+    path
+}
+
+fn qmp_status_fixture(root: &Path, name: &str, status: &str, running: &str) -> PathBuf {
+    let source =
+        std::fs::read_to_string(fixture("fake_qemu_system.py")).expect("read fake qemu fixture");
+    let patched = source.replace(
+        "{\"return\": {\"status\": \"running\", \"running\": True, \"singlestep\": False}}",
+        &format!(
+            "{{\"return\": {{\"status\": \"{status}\", \"running\": {running}, \"singlestep\": False}}}}"
+        ),
+    );
+    assert_ne!(patched, source);
+    write_executable_fixture(root, name, patched)
+}
+
+fn paused_fixture(root: &Path) -> PathBuf {
+    qmp_status_fixture(root, "fake_qemu_paused.py", "paused", "False")
+}
+
+fn shutdown_status_fixture(root: &Path) -> PathBuf {
+    qmp_status_fixture(root, "fake_qemu_shutdown_status.py", "shutdown", "False")
+}
+
+fn internal_error_status_fixture(root: &Path) -> PathBuf {
+    qmp_status_fixture(
+        root,
+        "fake_qemu_internal_error.py",
+        "internal-error",
+        "True",
+    )
+}
+
+fn overlapping_create_qemu_img_fixture(root: &Path) -> PathBuf {
+    let source =
+        std::fs::read_to_string(fixture("fake_qemu_img.py")).expect("read fake qemu-img fixture");
+    let patched = source
+        .replace("import sys", "import sys\nimport time")
+        .replace(
+            "        target = args[-2]\n",
+            "        target = args[-2]\n        started = target + \".\" + str(os.getpid()) + \".started\"\n        with open(started, \"w\", encoding=\"utf-8\"):\n            pass\n        deadline = time.time() + 1.0\n        while time.time() < deadline:\n            prefix = os.path.basename(target) + \".\"\n            count = len([name for name in os.listdir(os.path.dirname(target) or \".\") if name.startswith(prefix) and name.endswith(\".started\")])\n            if count >= 2:\n                break\n            time.sleep(0.01)\n",
+        );
+    assert!(patched.contains("deadline = time.time()"));
+    let path = root.join("fake_qemu_img_overlap.py");
+    std::fs::write(&path, patched).expect("write overlapping create fixture");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("fixture metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("fixture permissions");
+    path
 }
 
 fn spec(name: &str) -> MachineSpec {
@@ -525,6 +607,436 @@ async fn qmp_correlates_commands_and_receives_async_events() {
         .expect("status command");
     assert_eq!(status["status"], "running");
     let _ = child.kill().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comma_escaped_qmp_path_does_not_defeat_pid_liveness() {
+    let temp = tempfile::tempdir().expect("temporary root parent");
+    let root = temp.path().join("comma,root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let delayed_fixture = delayed_quit_fixture(fixture_root.path());
+    let mut starter = QemuBackend::new(&root)
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("commastop"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let pid: u32 = std::fs::read_to_string(root.join("commastop/qemu.pid"))
+        .expect("read pidfile")
+        .trim()
+        .parse()
+        .expect("parse pidfile");
+
+    let mut external = QemuBackend::new(&root)
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    let started = Instant::now();
+    external
+        .stop_machine(&machine)
+        .await
+        .expect("stop externally adopted machine");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "stop returned before the delayed QEMU process exited"
+    );
+    let _ = starter.shutdown_machines().await;
+    let _ = pid;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_record_without_pid_does_not_destroy_stopping_machine() {
+    let temp = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let delayed_fixture = delayed_quit_fixture(fixture_root.path());
+    let mut starter = QemuBackend::new(temp.path())
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("stalepid"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+
+    let qmp = QmpClient::connect(temp.path().join("stalepid/qmp.sock"))
+        .await
+        .expect("connect qmp");
+    qmp.execute("quit", None)
+        .await
+        .expect("request delayed quit");
+    drop(qmp);
+    let mut qmp_closed = false;
+    for _ in 0..100 {
+        if QmpClient::connect(temp.path().join("stalepid/qmp.sock"))
+            .await
+            .is_err()
+        {
+            qmp_closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(qmp_closed, "fake QEMU did not close its QMP listener");
+    std::fs::remove_file(temp.path().join("stalepid/qmp.sock"))
+        .expect("remove stale qmp socket while QEMU is still exiting");
+
+    let record_path = temp.path().join("stalepid/machine.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).expect("read machine record"))
+            .expect("parse machine record");
+    record["handle"]["state"] = serde_json::json!("stopped");
+    record["pid"] = serde_json::Value::Null;
+    std::fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&record).expect("serialize record"),
+    )
+    .expect("write stale machine record");
+
+    let mut external = QemuBackend::new(temp.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    assert!(
+        external.destroy_machine(&machine).await.is_err(),
+        "destroy accepted a machine whose pidfile still names a live QEMU process"
+    );
+    assert!(temp.path().join("stalepid").exists());
+    let _ = starter.shutdown_machines().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qmp_shutdown_state_is_not_treated_as_destroyable_stopped() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let shutdown_fixture = shutdown_status_fixture(fixture_root.path());
+    let mut starter = QemuBackend::new(root.path())
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(&shutdown_fixture, fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("qmpstopping"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+
+    let mut external = QemuBackend::new(root.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(&shutdown_fixture, fixture("fake_qemu_img.py"));
+    assert!(
+        external.destroy_machine(&machine).await.is_err(),
+        "destroy accepted a live QEMU process reporting shutdown"
+    );
+    assert!(root.path().join("qmpstopping").exists());
+    let _ = starter.shutdown_machines().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_live_qemu_is_not_destroyed_before_stop() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let error_fixture = internal_error_status_fixture(fixture_root.path());
+    let mut starter = QemuBackend::new(root.path())
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(&error_fixture, fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("failedlive"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    assert_eq!(
+        starter.status_machine(&machine).await.expect("status"),
+        MachineState::Failed
+    );
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join("failedlive/machine.json"))
+            .expect("read machine record"),
+    )
+    .expect("parse machine record");
+    assert!(
+        record["pid"].is_number(),
+        "live failed machine pid was cleared"
+    );
+
+    let mut external = QemuBackend::new(root.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(&error_fixture, fixture("fake_qemu_img.py"));
+    assert!(
+        external.destroy_machine(&machine).await.is_err(),
+        "destroy accepted a live QEMU process reporting internal-error"
+    );
+    assert!(
+        external.start_machine(&machine).await.is_err(),
+        "start accepted a live QEMU process reporting internal-error"
+    );
+    assert!(
+        external
+            .clone_machine(&machine, "failedclone")
+            .await
+            .is_err(),
+        "clone accepted a live QEMU process reporting internal-error"
+    );
+    assert!(root.path().join("failedlive").exists());
+    assert!(!root.path().join("failedclone").exists());
+    starter
+        .shutdown_machines()
+        .await
+        .expect("shutdown failed live machine");
+    assert_eq!(
+        starter.status_machine(&machine).await.expect("status"),
+        MachineState::Stopped
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_same_name_create_has_one_winner_without_deleting_state() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let qemu_img = overlapping_create_qemu_img_fixture(fixture_root.path());
+    let mut first = QemuBackend::new(root.path())
+        .await
+        .expect("first backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), &qemu_img);
+    let mut second = QemuBackend::new(root.path())
+        .await
+        .expect("second backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), &qemu_img);
+
+    let first_spec = spec("samecreate");
+    let second_spec = spec("samecreate");
+    let create_first = first.create_machine(&first_spec);
+    let create_second = second.create_machine(&second_spec);
+    let (first_result, second_result) = tokio::join!(create_first, create_second);
+    assert_ne!(
+        first_result.is_ok(),
+        second_result.is_ok(),
+        "exactly one concurrent creator may win the machine name"
+    );
+    let machines = first.list_machines().await.expect("list machines");
+    assert_eq!(machines.len(), 1);
+    assert!(root.path().join("samecreate/machine.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pid_reuse_decoy_with_socket_path_is_not_confused_for_qemu() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("pidreuse"))
+        .await
+        .expect("create machine");
+    let qmp_path = root.path().join("pidreuse/qmp.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&qmp_path).expect("bind stale qmp");
+    drop(listener);
+    let mut decoy = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import time; time.sleep(30)")
+        .arg(&qmp_path)
+        .spawn()
+        .expect("spawn pid reuse decoy");
+
+    let record_path = root.path().join("pidreuse/machine.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).expect("read machine record"))
+            .expect("parse machine record");
+    record["handle"]["state"] = serde_json::json!("stopped");
+    record["pid"] = serde_json::json!(decoy.id());
+    std::fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&record).expect("serialize record"),
+    )
+    .expect("write stale machine record");
+
+    assert_eq!(
+        backend.status_machine(&machine).await.expect("status"),
+        MachineState::Stopped
+    );
+    decoy.kill().expect("kill decoy");
+    let _ = decoy.wait().expect("reap decoy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_create_start_stop_destroy_cycles_clean_state() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+
+    for _ in 0..4 {
+        let machine = backend
+            .create_machine(&spec("cycle"))
+            .await
+            .expect("create cycle machine");
+        backend
+            .start_machine(&machine)
+            .await
+            .expect("start cycle machine");
+        backend
+            .stop_machine(&machine)
+            .await
+            .expect("stop cycle machine");
+        backend
+            .destroy_machine(&machine)
+            .await
+            .expect("destroy cycle machine");
+        assert!(!root.path().join("cycle").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_handles_externally_missing_machine() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut starter = QemuBackend::new(root.path())
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("missing"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let pid = std::fs::read_to_string(root.path().join("missing/qemu.pid"))
+        .expect("read pidfile")
+        .trim()
+        .to_string();
+    let killed = tokio::process::Command::new("kill")
+        .arg(pid)
+        .status()
+        .await
+        .expect("run kill");
+    assert!(killed.success());
+    let mut qmp_closed = false;
+    for _ in 0..100 {
+        if QmpClient::connect(root.path().join("missing/qmp.sock"))
+            .await
+            .is_err()
+        {
+            qmp_closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(qmp_closed, "fake QEMU did not close after SIGTERM");
+
+    let mut external = QemuBackend::new(root.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    external
+        .shutdown_machines()
+        .await
+        .expect("shutdown externally missing machine");
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join("missing/machine.json"))
+            .expect("read machine record"),
+    )
+    .expect("parse machine record");
+    assert_eq!(record["handle"]["state"], serde_json::json!("stopped"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_handles_paused_machine() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let paused_fixture = paused_fixture(fixture_root.path());
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(&paused_fixture, fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("paused"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    assert_eq!(
+        backend
+            .status_machine(&machine)
+            .await
+            .expect("paused status"),
+        MachineState::Paused
+    );
+    backend
+        .shutdown_machines()
+        .await
+        .expect("shutdown paused machine");
+    assert_eq!(
+        backend
+            .status_machine(&machine)
+            .await
+            .expect("stopped status"),
+        MachineState::Stopped
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_externally_stopping_machine() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let fixture_root = tempfile::tempdir().expect("temporary fixture root");
+    let delayed_fixture = delayed_quit_fixture(fixture_root.path());
+    let mut starter = QemuBackend::new(root.path())
+        .await
+        .expect("starter backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    let machine = starter
+        .create_machine(&spec("stopping"))
+        .await
+        .expect("create machine");
+    starter
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let qmp = QmpClient::connect(root.path().join("stopping/qmp.sock"))
+        .await
+        .expect("connect qmp");
+    qmp.execute("quit", None)
+        .await
+        .expect("request delayed quit");
+    drop(qmp);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = std::fs::remove_file(root.path().join("stopping/qmp.sock"));
+
+    let mut external = QemuBackend::new(root.path())
+        .await
+        .expect("external backend")
+        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+    let started = Instant::now();
+    external
+        .shutdown_machines()
+        .await
+        .expect("shutdown stopping machine");
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "shutdown returned before the stopping QEMU process exited"
+    );
+    let _ = starter.shutdown_machines().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

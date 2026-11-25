@@ -135,3 +135,112 @@ async fn stale_control_socket_file_is_replaced() {
     assert!(connected);
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unix_control_handles_independent_machine_lifecycle_requests() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix_control(server_socket, backend).await });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let create_one = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Create {
+                spec: spec("ipcone"),
+            })
+            .await
+    };
+    let create_two = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Create {
+                spec: spec("ipctwo"),
+            })
+            .await
+    };
+    let (created_one, created_two) = tokio::join!(create_one, create_two);
+    let one: MachineHandle =
+        serde_json::from_value(created_one.expect("create first")).expect("decode first machine");
+    let two: MachineHandle =
+        serde_json::from_value(created_two.expect("create second")).expect("decode second machine");
+
+    let start_one = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Start {
+                machine: one.clone(),
+            })
+            .await
+    };
+    let start_two = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Start {
+                machine: two.clone(),
+            })
+            .await
+    };
+    let (started_one, started_two) = tokio::join!(start_one, start_two);
+    started_one.expect("start first");
+    started_two.expect("start second");
+
+    let status_one = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Status {
+                machine: one.clone(),
+            })
+            .await
+    };
+    let status_two = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Status {
+                machine: two.clone(),
+            })
+            .await
+    };
+    let (status_one, status_two) = tokio::join!(status_one, status_two);
+    assert_eq!(status_one.expect("first status"), json!("running"));
+    assert_eq!(status_two.expect("second status"), json!("running"));
+
+    let stop_one = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Stop {
+                machine: one.clone(),
+            })
+            .await
+    };
+    let stop_two = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Stop {
+                machine: two.clone(),
+            })
+            .await
+    };
+    let (stopped_one, stopped_two) = tokio::join!(stop_one, stop_two);
+    stopped_one.expect("stop first");
+    stopped_two.expect("stop second");
+
+    let destroy_one = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Destroy { machine: one })
+            .await
+    };
+    let destroy_two = async {
+        UnixControlClient::new(&socket_path)
+            .invoke(&ControlRequest::Destroy { machine: two })
+            .await
+    };
+    let (destroyed_one, destroyed_two) = tokio::join!(destroy_one, destroy_two);
+    destroyed_one.expect("destroy first");
+    destroyed_two.expect("destroy second");
+    assert!(!root.path().join("ipcone").exists());
+    assert!(!root.path().join("ipctwo").exists());
+    server.abort();
+}

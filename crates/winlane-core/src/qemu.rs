@@ -190,15 +190,7 @@ impl QemuBackend {
 
     pub async fn create_machine(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
         spec.validate()?;
-        let state_dir = self.root_dir.join(&spec.name);
-        let cleanup_on_error = !tokio::fs::try_exists(&state_dir)
-            .await
-            .map_err(CoreError::io("check machine state directory", &state_dir))?;
-        let result = self.create_machine_inner(spec).await;
-        if result.is_err() && cleanup_on_error {
-            let _ = tokio::fs::remove_dir_all(&state_dir).await;
-        }
-        result
+        self.create_machine_inner(spec).await
     }
 
     async fn create_machine_inner(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
@@ -247,53 +239,63 @@ impl QemuBackend {
         validate_socket_path(&qmp_socket_path)?;
         let qga_socket_path = machine_qga_socket_path(&state_dir, spec.guest_agent)?;
 
-        create_private_dir(&state_dir, "create machine state directory").await?;
-        let disk_path = state_dir.join(DISK_FILE);
-        self.run_qemu_img_create(&disk_path, backing_path.as_deref(), spec.disk_gb)
-            .await?;
+        create_machine_state_dir(&state_dir, &spec.name).await?;
+        let result = async {
+            let disk_path = state_dir.join(DISK_FILE);
+            self.run_qemu_img_create(&disk_path, backing_path.as_deref(), spec.disk_gb)
+                .await?;
 
-        let tpm_state_dir = if spec.tpm {
-            let dir = state_dir.join(TPM_DIR);
-            create_private_dir(&dir, "create tpm state directory").await?;
-            Some(dir)
-        } else {
-            None
-        };
+            let tpm_state_dir = if spec.tpm {
+                let dir = state_dir.join(TPM_DIR);
+                create_private_dir(&dir, "create tpm state directory").await?;
+                Some(dir)
+            } else {
+                None
+            };
 
-        let handle = MachineHandle {
-            id: format!("machine-{}", Uuid::new_v4().simple()),
-            name: spec.name.clone(),
-            state_dir: state_dir.to_string_lossy().into_owned(),
-            backend: "qemu".to_string(),
-            state: MachineState::Defined,
-        };
-        let record = MachineRecord {
-            handle: handle.clone(),
-            spec: stored_spec.clone(),
-            disk_path,
-            qmp_socket_path,
-            qga_socket_path,
-            pid: None,
-            ovmf_vars_path: None,
-            tpm_state_dir,
-            pending_loadvm: None,
-            checkpoints: Vec::new(),
-        };
-        write_json(&state_dir.join(SPEC_FILE), &stored_spec).await?;
-        self.write_record(&record).await?;
-        Ok(handle)
+            let handle = MachineHandle {
+                id: format!("machine-{}", Uuid::new_v4().simple()),
+                name: spec.name.clone(),
+                state_dir: state_dir.to_string_lossy().into_owned(),
+                backend: "qemu".to_string(),
+                state: MachineState::Defined,
+            };
+            let record = MachineRecord {
+                handle: handle.clone(),
+                spec: stored_spec.clone(),
+                disk_path,
+                qmp_socket_path,
+                qga_socket_path,
+                pid: None,
+                ovmf_vars_path: None,
+                tpm_state_dir,
+                pending_loadvm: None,
+                checkpoints: Vec::new(),
+            };
+            write_json(&state_dir.join(SPEC_FILE), &stored_spec).await?;
+            self.write_record(&record).await?;
+            Ok::<MachineHandle, CoreError>(handle)
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_dir_all(&state_dir).await;
+        }
+        result
     }
 
     pub async fn start_machine(&mut self, machine: &MachineHandle) -> CoreResult<()> {
         let mut record = self.load_record(machine).await?;
         let state = self.status_machine(&record.handle).await?;
-        if matches!(state, MachineState::Running | MachineState::Paused) {
+        if matches!(
+            state,
+            MachineState::Running | MachineState::Paused | MachineState::Failed
+        ) {
             return Err(CoreError::InvalidState {
                 machine: record.handle.name,
-                actual: if matches!(state, MachineState::Running) {
-                    "running"
-                } else {
-                    "paused"
+                actual: match state {
+                    MachineState::Running => "running",
+                    MachineState::Paused => "paused",
+                    _ => "failed",
                 },
                 expected: "stopped",
             });
@@ -378,10 +380,11 @@ impl QemuBackend {
                 record.qmp_socket_path.clone(),
             ))?
         {
+            let pid = machine_process_id(&record).await;
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => {
                     let _ = qmp.execute("quit", None).await;
-                    if !wait_for_external_qmp_exit(&record.qmp_socket_path, record.pid).await? {
+                    if !wait_for_external_qmp_exit(&record.qmp_socket_path, pid).await? {
                         return Err(CoreError::Qemu(format!(
                             "qemu process for machine '{}' did not exit after qmp quit",
                             record.handle.name
@@ -389,15 +392,22 @@ impl QemuBackend {
                     }
                 }
                 Err(_) => {
-                    record.handle.state = MachineState::Stopped;
-                    self.write_record(&record).await?;
-                    return Ok(());
+                    if !wait_for_external_qmp_exit(&record.qmp_socket_path, pid).await? {
+                        return Err(CoreError::Qemu(format!(
+                            "qemu process for machine '{}' is not accepting qmp connections but has not exited",
+                            record.handle.name
+                        )));
+                    }
                 }
             }
         } else {
-            record.handle.state = MachineState::Stopped;
-            self.write_record(&record).await?;
-            return Ok(());
+            let pid = machine_process_id(&record).await;
+            if !wait_for_external_qmp_exit(&record.qmp_socket_path, pid).await? {
+                return Err(CoreError::Qemu(format!(
+                    "qemu process for machine '{}' is still running without a qmp socket",
+                    record.handle.name
+                )));
+            }
         }
 
         record.pid = None;
@@ -410,7 +420,10 @@ impl QemuBackend {
         let machines = self.list_machines().await?;
         let mut first_error = None;
         for handle in machines {
-            if !matches!(handle.state, MachineState::Running | MachineState::Paused) {
+            if !matches!(
+                handle.state,
+                MachineState::Running | MachineState::Paused | MachineState::Failed
+            ) {
                 continue;
             }
             if let Err(error) = self.stop_machine(&handle).await
@@ -457,7 +470,7 @@ impl QemuBackend {
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => query_machine_state(&qmp).await?,
                 Err(_) => {
-                    if let Some(pid) = record.pid
+                    if let Some(pid) = machine_process_id(&record).await
                         && qemu_process_alive(pid, &record.qmp_socket_path).await
                     {
                         MachineState::Running
@@ -467,14 +480,22 @@ impl QemuBackend {
                 }
             }
         } else {
-            record.handle.state.clone()
+            if let Some(pid) = machine_process_id(&record).await
+                && qemu_process_alive(pid, &record.qmp_socket_path).await
+            {
+                MachineState::Running
+            } else {
+                record.handle.state.clone()
+            }
         };
 
         if remove_dead_process {
             self.running.remove(&machine_id);
         }
         record.handle.state = state.clone();
-        if matches!(state, MachineState::Stopped | MachineState::Failed) {
+        if matches!(state, MachineState::Stopped)
+            || (matches!(state, MachineState::Failed) && remove_dead_process)
+        {
             record.pid = None;
         }
         self.write_record(&record).await?;
@@ -486,15 +507,7 @@ impl QemuBackend {
         machine: &MachineHandle,
         name: &str,
     ) -> CoreResult<MachineHandle> {
-        let state_dir = self.root_dir.join(name);
-        let cleanup_on_error = !tokio::fs::try_exists(&state_dir)
-            .await
-            .map_err(CoreError::io("check clone state directory", &state_dir))?;
-        let result = self.clone_machine_inner(machine, name).await;
-        if result.is_err() && cleanup_on_error {
-            let _ = tokio::fs::remove_dir_all(&state_dir).await;
-        }
-        result
+        self.clone_machine_inner(machine, name).await
     }
 
     async fn clone_machine_inner(
@@ -504,10 +517,17 @@ impl QemuBackend {
     ) -> CoreResult<MachineHandle> {
         let source = self.load_record(machine).await?;
         let state = self.status_machine(machine).await?;
-        if matches!(state, MachineState::Running | MachineState::Paused) {
+        if matches!(
+            state,
+            MachineState::Running | MachineState::Paused | MachineState::Failed
+        ) {
             return Err(CoreError::InvalidState {
                 machine: source.handle.name,
-                actual: "running",
+                actual: match state {
+                    MachineState::Running => "running",
+                    MachineState::Paused => "paused",
+                    _ => "failed",
+                },
                 expected: "stopped",
             });
         }
@@ -526,51 +546,65 @@ impl QemuBackend {
         }
         validate_socket_path(&state_dir.join(QMP_SOCKET_FILE))?;
         let qga_socket_path = machine_qga_socket_path(&state_dir, spec.guest_agent)?;
-        create_private_dir(&state_dir, "create clone state directory").await?;
+        create_machine_state_dir(&state_dir, name).await?;
 
-        let disk_path = state_dir.join(DISK_FILE);
-        self.run_qemu_img_convert(&source.disk_path, &disk_path)
-            .await?;
-        set_private_file(&disk_path).await?;
+        let result = async {
+            let disk_path = state_dir.join(DISK_FILE);
+            self.run_qemu_img_convert(&source.disk_path, &disk_path)
+                .await?;
+            set_private_file(&disk_path).await?;
 
-        let tpm_state_dir = if spec.tpm {
-            let dir = state_dir.join(TPM_DIR);
-            create_private_dir(&dir, "create clone tpm state directory").await?;
-            Some(dir)
-        } else {
-            None
-        };
-        let handle = MachineHandle {
-            id: format!("machine-{}", Uuid::new_v4().simple()),
-            name: name.to_string(),
-            state_dir: state_dir.to_string_lossy().into_owned(),
-            backend: "qemu".to_string(),
-            state: MachineState::Defined,
-        };
-        let record = MachineRecord {
-            handle: handle.clone(),
-            spec: spec.clone(),
-            disk_path,
-            qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
-            qga_socket_path,
-            pid: None,
-            ovmf_vars_path: None,
-            tpm_state_dir,
-            pending_loadvm: None,
-            checkpoints: Vec::new(),
-        };
-        write_json(&state_dir.join(SPEC_FILE), &spec).await?;
-        self.write_record(&record).await?;
-        Ok(handle)
+            let tpm_state_dir = if spec.tpm {
+                let dir = state_dir.join(TPM_DIR);
+                create_private_dir(&dir, "create clone tpm state directory").await?;
+                Some(dir)
+            } else {
+                None
+            };
+            let handle = MachineHandle {
+                id: format!("machine-{}", Uuid::new_v4().simple()),
+                name: name.to_string(),
+                state_dir: state_dir.to_string_lossy().into_owned(),
+                backend: "qemu".to_string(),
+                state: MachineState::Defined,
+            };
+            let record = MachineRecord {
+                handle: handle.clone(),
+                spec: spec.clone(),
+                disk_path,
+                qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+                qga_socket_path,
+                pid: None,
+                ovmf_vars_path: None,
+                tpm_state_dir,
+                pending_loadvm: None,
+                checkpoints: Vec::new(),
+            };
+            write_json(&state_dir.join(SPEC_FILE), &spec).await?;
+            self.write_record(&record).await?;
+            Ok::<MachineHandle, CoreError>(handle)
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_dir_all(&state_dir).await;
+        }
+        result
     }
 
     pub async fn destroy_machine(&mut self, machine: &MachineHandle) -> CoreResult<()> {
         let record = self.load_record(machine).await?;
         let state = self.status_machine(machine).await?;
-        if matches!(state, MachineState::Running | MachineState::Paused) {
+        if matches!(
+            state,
+            MachineState::Running | MachineState::Paused | MachineState::Failed
+        ) {
             return Err(CoreError::InvalidState {
                 machine: record.handle.name,
-                actual: "running",
+                actual: match state {
+                    MachineState::Running => "running",
+                    MachineState::Paused => "paused",
+                    _ => "failed",
+                },
                 expected: "stopped",
             });
         }
@@ -707,13 +741,16 @@ impl QemuBackend {
             ));
         }
         let state = self.status_machine(&record.handle).await?;
-        if matches!(state, MachineState::Running | MachineState::Paused) {
+        if matches!(
+            state,
+            MachineState::Running | MachineState::Paused | MachineState::Failed
+        ) {
             return Err(CoreError::InvalidState {
                 machine: record.handle.name.clone(),
-                actual: if matches!(state, MachineState::Running) {
-                    "running"
-                } else {
-                    "paused"
+                actual: match state {
+                    MachineState::Running => "running",
+                    MachineState::Paused => "paused",
+                    _ => "failed",
                 },
                 expected: "stopped",
             });
@@ -1317,7 +1354,6 @@ async fn query_machine_state(qmp: &QmpClient) -> CoreResult<MachineState> {
     Ok(match status {
         "running" => MachineState::Running,
         "paused" | "suspended" => MachineState::Paused,
-        "shutdown" | "postmigrate" | "prelaunch" => MachineState::Stopped,
         "internal-error" | "io-error" | "guest-panicked" => MachineState::Failed,
         _ => MachineState::Running,
     })
@@ -1416,8 +1452,26 @@ async fn qemu_process_alive(pid: u32, qmp_socket_path: &Path) -> bool {
     if cmdline.is_empty() {
         return false;
     }
-    let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-    cmdline.contains(&qmp_socket_path.to_string_lossy().into_owned())
+    let socket_path = qmp_socket_path.to_string_lossy();
+    let expected_arg = format!(
+        "unix:{},server=on,wait=off",
+        qemu_option_escape(&socket_path)
+    );
+    cmdline
+        .split(|byte| *byte == 0)
+        .any(|arg| arg == expected_arg.as_bytes())
+}
+
+async fn machine_process_id(record: &MachineRecord) -> Option<u32> {
+    let pid_path = PathBuf::from(&record.handle.state_dir).join("qemu.pid");
+    if let Some(pid) = tokio::fs::read_to_string(pid_path)
+        .await
+        .ok()
+        .and_then(|pid| pid.trim().parse().ok())
+    {
+        return Some(pid);
+    }
+    record.pid
 }
 
 async fn external_qmp_is_gone(path: &Path) -> CoreResult<bool> {
@@ -1488,10 +1542,33 @@ async fn run_quiet_command(command: &mut Command, operation: &'static str) -> Co
 
 async fn write_json(path: &Path, value: &impl Serialize) -> CoreResult<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
-    tokio::fs::write(path, bytes)
-        .await
-        .map_err(CoreError::io("write json", path))?;
-    set_private_file(path).await
+    let temp_path = sibling_path(path, &format!(".tmp-{}", Uuid::new_v4().simple()));
+    let result = async {
+        tokio::fs::write(&temp_path, bytes)
+            .await
+            .map_err(CoreError::io("write json", &temp_path))?;
+        set_private_file(&temp_path).await?;
+        tokio::fs::rename(&temp_path, path)
+            .await
+            .map_err(CoreError::io("replace json", path))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+    }
+    result
+}
+
+async fn create_machine_state_dir(path: &Path, name: &str) -> CoreResult<()> {
+    match tokio::fs::create_dir(path).await {
+        Ok(()) => tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(CoreError::io("create machine state directory", path)),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(
+            CoreError::InvalidHandle(format!("machine name '{name}' is already in use")),
+        ),
+        Err(error) => Err(CoreError::io("create machine state directory", path)(error)),
+    }
 }
 
 async fn create_private_dir(path: &Path, operation: &'static str) -> CoreResult<()> {
@@ -1962,6 +2039,28 @@ mod tests {
         assert!(!target_dir.join("obsolete").exists());
         assert!(!sibling_path(&target_dir, ".winlane-new").exists());
         assert!(!sibling_path(&target_dir, ".winlane-old").exists());
+    }
+
+    #[tokio::test]
+    async fn json_writes_replace_contents_without_leaving_staging_files() {
+        let root = tempfile::tempdir().expect("temporary json root");
+        let path = root.path().join("state.json");
+        write_json(&path, &json!({"version": 1}))
+            .await
+            .expect("write initial json");
+        write_json(&path, &json!({"version": 2}))
+            .await
+            .expect("replace json");
+        let value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read replaced json"))
+                .expect("parse replaced json");
+        assert_eq!(value["version"], 2);
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("read json directory")
+                .count(),
+            1
+        );
     }
 
     #[test]
