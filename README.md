@@ -34,15 +34,20 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - UI Automation returned real desktop and Notepad nodes from the interactive session
 - invoking a visible Notepad control succeeded through the semantic UI path
 - QEMU lifecycle and checkpoint behavior passed real QEMU/KVM tests on blank machines
+- a running Windows checkpoint restored QEMU memory/device and disk state; the restored frame hash exactly matched the pre-change checkpoint-state frame
+- a stopped Windows machine clone booted and exposed a ready guest agent
+- isolated networking produced no QEMU user NAT, `netdev`, or virtio-net device
+- pointer movement reached the Windows desktop and produced visible cursor/tooltip state
 
 Not yet proven end-to-end:
 
-- checkpoint restore on a booted Windows image
-- visual proof of hardware input changing a Windows desktop state
-- network policy behavior inside the guest
+- reliable visible keyboard, click, and typing activation; Ctrl-Esc worked once but was not reproducible in the fixed rerun
+- checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across a matrix of real terminal emulators
 - semantic MCP tools end-to-end against a live machine
 - long-running stability, concurrent machine use, and multi-machine cleanup
+
+Running checkpoints include RAM and can be several GiB. Clones are qcow2 overlays backed by the source disk; they receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
 
 ## Requirements
 
