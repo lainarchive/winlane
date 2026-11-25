@@ -755,6 +755,10 @@ async fn base_image_and_guest_agent_create_overlay_and_qga_socket() {
     assert!(serial_index < chardev_index);
     assert!(chardev_index < port_index);
     assert!(argv[chardev_index].contains("server=on,wait=off"));
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["-rtc", "base=localtime"])
+    );
     assert!(argv[chardev_index].contains(&qga_socket_string));
 
     backend

@@ -1225,6 +1225,8 @@ impl QemuBackend {
             record.spec.cpus.to_string(),
             "-display".to_string(),
             "none".to_string(),
+            "-rtc".to_string(),
+            "base=localtime".to_string(),
             "-serial".to_string(),
             "none".to_string(),
             "-monitor".to_string(),
