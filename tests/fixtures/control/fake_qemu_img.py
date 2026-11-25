@@ -22,6 +22,9 @@ def main():
         size = args[-1]
         with open(target, "w", encoding="utf-8") as output:
             output.write(json.dumps({"format": "qcow2", "backing": backing, "backing_format": backing_format, "size": size}) + "\n")
+        if "failcreate" in target:
+            print("forced create failure", file=sys.stderr)
+            return 1
         return 0
     if args[0] == "convert":
         source = args[-2]
@@ -36,6 +39,9 @@ def main():
             return 1
         with open(target, "w", encoding="utf-8") as output:
             output.write(json.dumps({"format": "qcow2", "converted_from": source, "backing": None}) + "\n")
+        if "failclone" in target:
+            print("forced convert failure", file=sys.stderr)
+            return 1
         return 0
     if args[0] == "snapshot":
         action = args[1]

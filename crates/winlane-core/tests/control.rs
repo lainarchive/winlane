@@ -150,6 +150,29 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_create_and_clone_remove_partial_state() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+
+    assert!(backend.create_machine(&spec("failcreate")).await.is_err());
+    assert!(!root.path().join("failcreate").exists());
+
+    let source = backend
+        .create_machine(&spec("clonesource"))
+        .await
+        .expect("create clone source");
+    assert!(backend.clone_machine(&source, "failclone").await.is_err());
+    assert!(!root.path().join("failclone").exists());
+    backend
+        .destroy_machine(&source)
+        .await
+        .expect("destroy clone source");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_fake_machines_run_and_clean_up_independently() {
     let root = tempfile::tempdir().expect("temporary machine root");
     let mut backend = QemuBackend::new(root.path())

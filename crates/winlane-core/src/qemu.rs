@@ -190,6 +190,19 @@ impl QemuBackend {
 
     pub async fn create_machine(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
         spec.validate()?;
+        let state_dir = self.root_dir.join(&spec.name);
+        let cleanup_on_error = !tokio::fs::try_exists(&state_dir)
+            .await
+            .map_err(CoreError::io("check machine state directory", &state_dir))?;
+        let result = self.create_machine_inner(spec).await;
+        if result.is_err() && cleanup_on_error {
+            let _ = tokio::fs::remove_dir_all(&state_dir).await;
+        }
+        result
+    }
+
+    async fn create_machine_inner(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
+        spec.validate()?;
         if spec.arch != CpuArch::X86_64 {
             return Err(CoreError::Unsupported(
                 "QEMU control currently supports x86_64 only",
@@ -450,6 +463,22 @@ impl QemuBackend {
     }
 
     pub async fn clone_machine(
+        &mut self,
+        machine: &MachineHandle,
+        name: &str,
+    ) -> CoreResult<MachineHandle> {
+        let state_dir = self.root_dir.join(name);
+        let cleanup_on_error = !tokio::fs::try_exists(&state_dir)
+            .await
+            .map_err(CoreError::io("check clone state directory", &state_dir))?;
+        let result = self.clone_machine_inner(machine, name).await;
+        if result.is_err() && cleanup_on_error {
+            let _ = tokio::fs::remove_dir_all(&state_dir).await;
+        }
+        result
+    }
+
+    async fn clone_machine_inner(
         &mut self,
         machine: &MachineHandle,
         name: &str,
