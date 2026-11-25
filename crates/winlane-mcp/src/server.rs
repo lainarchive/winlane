@@ -178,7 +178,13 @@ fn evidence_kind_for_tool(tool: &str) -> &'static str {
         "machine_start" => "machine_started",
         "machine_stop" => "machine_stopped",
         "screenshot" => "frame_captured",
-        "click" | "move" | "type_text" | "key" | "scroll" => "input_sent",
+        "click" | "move" | "type_text" | "key" | "scroll" | "ui_invoke" | "ui_set_text" => {
+            "input_sent"
+        }
+        "ui_tree" => "ui_tree_read",
+        "process_run" => "process_exited",
+        "file_import" => "file_imported",
+        "file_export" => "file_exported",
         "checkpoint_create" => "checkpoint_created",
         "checkpoint_restore" => "checkpoint_restored",
         _ => "machine_status",
@@ -187,13 +193,29 @@ fn evidence_kind_for_tool(tool: &str) -> &'static str {
 
 fn sanitize_tool_input(tool: &str, input: &Value) -> Value {
     let mut sanitized = input.clone();
-    if tool == "type_text"
+    if matches!(tool, "type_text" | "ui_set_text")
         && let Some(text) = input.get("text").and_then(Value::as_str)
     {
         sanitized["text"] = json!({
             "sha256": sha256_hex(text.as_bytes()),
             "bytes": text.len(),
         });
+    }
+    if tool == "process_run"
+        && let Some(args) = input.get("args").and_then(Value::as_array)
+    {
+        sanitized["args"] = json!(
+            args.iter()
+                .map(|argument| {
+                    argument.as_str().map_or(argument.clone(), |argument| {
+                        json!({
+                            "sha256": sha256_hex(argument.as_bytes()),
+                            "bytes": argument.len(),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
     }
     sanitized
 }
@@ -273,9 +295,30 @@ mod tests {
     }
 
     #[test]
+    fn redacts_semantic_text_and_process_args_in_evidence_input() {
+        let input = json!({
+            "machine":{"id":"m"},
+            "text":"secret",
+            "args":["visible?", "--password=secret"]
+        });
+        let text_sanitized = sanitize_tool_input("ui_set_text", &input);
+        assert_eq!(text_sanitized["text"]["bytes"], 6);
+        assert_ne!(text_sanitized["text"], "secret");
+        let process_sanitized = sanitize_tool_input("process_run", &input);
+        assert_eq!(process_sanitized["args"][0]["bytes"], 8);
+        assert_eq!(process_sanitized["args"][1]["bytes"], 17);
+        assert!(!process_sanitized["args"].to_string().contains("secret"));
+    }
+
+    #[test]
     fn maps_control_tools_to_evidence_kinds() {
         assert_eq!(evidence_kind_for_tool("screenshot"), "frame_captured");
         assert_eq!(evidence_kind_for_tool("click"), "input_sent");
+        assert_eq!(evidence_kind_for_tool("ui_set_text"), "input_sent");
+        assert_eq!(evidence_kind_for_tool("ui_tree"), "ui_tree_read");
+        assert_eq!(evidence_kind_for_tool("process_run"), "process_exited");
+        assert_eq!(evidence_kind_for_tool("file_import"), "file_imported");
+        assert_eq!(evidence_kind_for_tool("file_export"), "file_exported");
         assert_eq!(
             evidence_kind_for_tool("checkpoint_restore"),
             "checkpoint_restored"

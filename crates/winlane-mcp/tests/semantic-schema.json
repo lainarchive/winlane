@@ -1,0 +1,302 @@
+[
+  {
+    "name": "ui_tree",
+    "description": "Read the guest UI Automation tree",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 8
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000,
+          "default": 2000
+        }
+      },
+      "required": [
+        "machine"
+      ]
+    }
+  },
+  {
+    "name": "ui_invoke",
+    "description": "Invoke a UI element by tree node path",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^0(/[0-9]+)*$"
+        }
+      },
+      "required": [
+        "machine",
+        "node"
+      ]
+    }
+  },
+  {
+    "name": "ui_set_text",
+    "description": "Set text on a UI element by tree node path",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^0(/[0-9]+)*$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "machine",
+        "node",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "process_run",
+    "description": "Run a guest process and capture exit status",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000,
+          "default": 30000
+        }
+      },
+      "required": [
+        "machine",
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "file_import",
+    "description": "Copy a host file into the guest",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "host_path": {
+          "type": "string"
+        },
+        "guest_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "host_path",
+        "guest_path"
+      ]
+    }
+  },
+  {
+    "name": "file_export",
+    "description": "Copy a guest file to the host",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "object",
+          "description": "MachineHandle returned by machine creation or restore",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_dir": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state_dir",
+            "backend",
+            "state"
+          ]
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "host_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "guest_path",
+        "host_path"
+      ]
+    }
+  }
+]
