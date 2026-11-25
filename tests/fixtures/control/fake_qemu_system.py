@@ -145,7 +145,7 @@ def main():
                 elif execute in {"snapshot-save", "snapshot-load"}:
                     snapshot_job_ids.append(arguments.get("job-id", "checkpoint-fake"))
                     reply(connection, identifier, {"return": {}})
-                elif execute == "cont":
+                elif execute in {"stop", "cont"}:
                     reply(connection, identifier, {"return": {}})
                 elif execute == "query-jobs":
                     reply(connection, identifier, {"return": [{"id": job_id, "type": "snapshot", "status": "concluded", "current-progress": 1, "total-progress": 1} for job_id in snapshot_job_ids]})

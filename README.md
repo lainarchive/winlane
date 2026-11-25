@@ -58,7 +58,6 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 Not yet proven end-to-end:
 
 - hardware keyboard input is limited to printable ASCII plus newline and tab, paced at roughly 25 characters per second
-- checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across real terminal emulators beyond the validated kitty, Ghostty, and WezTerm X11 paths
 - sustained real-guest live-view throughput above the conservative 5 fps default; synthetic real-kitty validation nearly sustained 15 fps but showed high terminal CPU and requested 30 fps converged to about 14.8 captures/s
 - long-running stability and broader concurrent machine use
@@ -151,7 +150,7 @@ cargo run --release -p winlane-cli -- machine list \
   --control-socket /tmp/winlane-control.sock
 ```
 
-Clone a stopped machine or destroy it explicitly:
+Clone a stopped machine or destroy it explicitly. After restoring a running-machine checkpoint, start the machine once before cloning so the pending internal snapshot load is materialized; cloning in that pending state is rejected instead of copying the pre-restore disk:
 
 ```sh
 clone=$(cargo run --release -p winlane-cli -- machine clone \
@@ -164,7 +163,7 @@ cargo run --release -p winlane-cli -- machine destroy \
   --machine demo-1-copy
 ```
 
-Create a checkpoint and save the printed reference. A running-machine checkpoint includes QEMU memory/device state; a stopped-machine checkpoint includes disk state. Labels are optional and limited to ASCII letters, digits, dash, and underscore:
+Create a checkpoint and save the printed reference. A running-machine checkpoint briefly pauses the guest so QEMU memory/device and disk state are captured from the same quiesced point as firmware-variable and TPM state, then resumes the guest; a stopped-machine checkpoint includes disk state. Labels are optional and limited to ASCII letters, digits, dash, and underscore:
 
 ```sh
 cargo run --release -p winlane-cli -- machine checkpoint create \

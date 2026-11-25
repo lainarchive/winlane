@@ -90,6 +90,34 @@ fn internal_error_status_fixture(root: &Path) -> PathBuf {
     )
 }
 
+fn qmp_command_position(commands: &str, name: &str) -> usize {
+    commands
+        .lines()
+        .position(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|command| {
+                    command
+                        .get("execute")?
+                        .as_str()
+                        .map(|execute| execute == name)
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| panic!("missing {name} in QMP log"))
+}
+
+fn failing_snapshot_fixture(root: &Path) -> PathBuf {
+    let source =
+        std::fs::read_to_string(fixture("fake_qemu_system.py")).expect("read fake qemu fixture");
+    let patched = source.replace(
+        "elif execute in {\"snapshot-save\", \"snapshot-load\"}:\n                    snapshot_job_ids.append(arguments.get(\"job-id\", \"checkpoint-fake\"))\n                    reply(connection, identifier, {\"return\": {}})",
+        "elif execute == \"snapshot-save\":\n                    reply(connection, identifier, {\"error\": {\"class\": \"GenericError\", \"desc\": \"injected snapshot failure\"}})\n                elif execute == \"snapshot-load\":\n                    snapshot_job_ids.append(arguments.get(\"job-id\", \"checkpoint-fake\"))\n                    reply(connection, identifier, {\"return\": {}})",
+    );
+    assert_ne!(patched, source);
+    write_executable_fixture(root, "fake_qemu_snapshot_failure.py", patched)
+}
+
 fn overlapping_create_qemu_img_fixture(root: &Path) -> PathBuf {
     let source =
         std::fs::read_to_string(fixture("fake_qemu_img.py")).expect("read fake qemu-img fixture");
@@ -305,6 +333,12 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
     ] {
         assert!(commands.contains(expected), "missing {expected} in QMP log");
     }
+    let positions = ["stop", "snapshot-save", "query-jobs", "cont"]
+        .map(|name| qmp_command_position(&commands, name));
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "checkpoint was not quiesced in stop/snapshot/copy/cont order: {positions:?}"
+    );
 
     backend
         .destroy_machine(&clone)
@@ -316,6 +350,43 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
         .expect("destroy machine");
     assert!(!root.path().join("controltest").exists());
     assert!(!root.path().join("controlclone").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clone_is_rejected_while_running_checkpoint_restore_is_pending() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("pendingclone"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let checkpoint = backend
+        .checkpoint_machine(&machine, "running")
+        .await
+        .expect("running checkpoint");
+    backend.stop_machine(&machine).await.expect("stop machine");
+    let restored = backend
+        .restore_checkpoint(&checkpoint)
+        .await
+        .expect("restore checkpoint");
+
+    let error = backend
+        .clone_machine(&restored, "pendingclonecopy")
+        .await
+        .expect_err("clone with pending checkpoint load must be rejected");
+    assert!(error.to_string().contains("pending checkpoint load"));
+    assert!(!root.path().join("pendingclonecopy").exists());
+    backend
+        .destroy_machine(&restored)
+        .await
+        .expect("destroy machine");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -447,6 +518,38 @@ async fn failed_checkpoint_removes_partial_state() {
             0
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_running_checkpoint_still_resumes_machine() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let qemu = failing_snapshot_fixture(root.path());
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(qemu, fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("checkpointresume"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+
+    assert!(
+        backend
+            .checkpoint_machine(&machine, "will_fail")
+            .await
+            .is_err()
+    );
+    let commands = std::fs::read_to_string(root.path().join("checkpointresume/qmp.sock.commands"))
+        .expect("QMP command log");
+    let stop = qmp_command_position(&commands, "stop");
+    let save = qmp_command_position(&commands, "snapshot-save");
+    let cont = qmp_command_position(&commands, "cont");
+    assert!(stop < save && save < cont, "{stop} {save} {cont}");
+    backend.stop_machine(&machine).await.expect("stop machine");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1316,6 +1419,13 @@ async fn real_qemu_machine_control_proof() {
         .await
         .expect("real checkpoint");
     assert!(checkpoint.sha256.is_some());
+    assert_eq!(
+        backend
+            .status_machine(&machine)
+            .await
+            .expect("post-checkpoint status"),
+        MachineState::Running
+    );
     backend
         .stop_machine(&machine)
         .await
@@ -1486,6 +1596,13 @@ async fn real_qemu_uefi_tpm_control_proof() {
         .await
         .expect("firmware tpm checkpoint");
     assert!(checkpoint.sha256.is_some());
+    assert_eq!(
+        backend
+            .status_machine(&machine)
+            .await
+            .expect("post-checkpoint status"),
+        MachineState::Running
+    );
     backend
         .stop_machine(&machine)
         .await

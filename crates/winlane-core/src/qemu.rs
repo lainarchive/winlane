@@ -572,6 +572,13 @@ impl QemuBackend {
                 expected: "stopped",
             });
         }
+        if source.pending_loadvm.is_some() {
+            return Err(CoreError::InvalidState {
+                machine: source.handle.name,
+                actual: "stopped with a pending checkpoint load",
+                expected: "stopped without a pending checkpoint load",
+            });
+        }
 
         let mut spec = source.spec.clone();
         spec.name = name.to_string();
@@ -696,35 +703,61 @@ impl QemuBackend {
             }
             _ => false,
         };
-        if vm_state_included {
+        let (firmware_vars_included, tpm_state_included) = if vm_state_included {
             let qmp = self.qmp_for_machine(machine).await?;
-            qmp.execute_with_timeout(
-                "snapshot-save",
-                Some(json!({
-                    "job-id": checkpoint_id,
-                    "tag": checkpoint_id,
-                    "vmstate": SYSTEM_DISK_NODE,
-                    "devices": [SYSTEM_DISK_NODE],
-                })),
-                SNAPSHOT_COMMAND_TIMEOUT,
-            )
-            .await?;
-            wait_for_snapshot_job(&qmp, checkpoint_id).await?;
+            qmp.execute("stop", None).await?;
+            let copy_result = async {
+                qmp.execute_with_timeout(
+                    "snapshot-save",
+                    Some(json!({
+                        "job-id": checkpoint_id,
+                        "tag": checkpoint_id,
+                        "vmstate": SYSTEM_DISK_NODE,
+                        "devices": [SYSTEM_DISK_NODE],
+                    })),
+                    SNAPSHOT_COMMAND_TIMEOUT,
+                )
+                .await?;
+                wait_for_snapshot_job(&qmp, checkpoint_id).await?;
+                let firmware_vars_included = copy_optional_file(
+                    record.ovmf_vars_path.as_deref(),
+                    &checkpoint_dir.join(OVMF_VARS_FILE),
+                )
+                .await?;
+                let tpm_state_included = copy_optional_dir(
+                    record.tpm_state_dir.as_deref(),
+                    &checkpoint_dir.join(TPM_DIR),
+                )
+                .await?;
+                Ok::<(bool, bool), CoreError>((firmware_vars_included, tpm_state_included))
+            }
+            .await;
+            let cont_result = qmp.execute("cont", None).await;
+            match (copy_result, cont_result) {
+                (Ok(copies), Ok(_)) => copies,
+                (Err(copy_error), Err(cont_error)) => {
+                    return Err(CoreError::Qemu(format!(
+                        "checkpoint failed: {copy_error}; machine could not be resumed: {cont_error}"
+                    )));
+                }
+                (Err(error), Ok(_)) => return Err(error),
+                (Ok(_), Err(error)) => return Err(error.into()),
+            }
         } else {
             self.run_qemu_img_snapshot("-c", checkpoint_id, &record.disk_path)
                 .await?;
-        }
-
-        let firmware_vars_included = copy_optional_file(
-            record.ovmf_vars_path.as_deref(),
-            &checkpoint_dir.join(OVMF_VARS_FILE),
-        )
-        .await?;
-        let tpm_state_included = copy_optional_dir(
-            record.tpm_state_dir.as_deref(),
-            &checkpoint_dir.join(TPM_DIR),
-        )
-        .await?;
+            let firmware_vars_included = copy_optional_file(
+                record.ovmf_vars_path.as_deref(),
+                &checkpoint_dir.join(OVMF_VARS_FILE),
+            )
+            .await?;
+            let tpm_state_included = copy_optional_dir(
+                record.tpm_state_dir.as_deref(),
+                &checkpoint_dir.join(TPM_DIR),
+            )
+            .await?;
+            (firmware_vars_included, tpm_state_included)
+        };
 
         let checkpoint = CheckpointRef {
             id: checkpoint_id.to_string(),
