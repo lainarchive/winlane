@@ -137,10 +137,20 @@ async fn tool_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
     let outcome = control.dispatch(name, &arguments).await;
-    if let Some(store) = evidence {
-        record_tool_evidence(store, name, &arguments, &outcome).await?;
-    }
+    let evidence_error = if let Some(store) = evidence {
+        match record_tool_evidence(store, name, &arguments, &outcome).await {
+            Ok(()) => None,
+            Err(error) => Some(error.to_string()),
+        }
+    } else {
+        None
+    };
     let result = outcome?;
+    let result = if let Some(error) = evidence_error {
+        decorate_evidence_failure(result, &error)
+    } else {
+        result
+    };
     let text = serde_json::to_string_pretty(&result)?;
     Ok(json!({
         "content": [{"type":"text","text":text}],
@@ -176,6 +186,23 @@ async fn record_tool_evidence(
         .record(evidence_kind_for_tool(tool), machine_id, payload)
         .map_err(McpError::from)?;
     Ok(())
+}
+
+fn decorate_evidence_failure(result: Value, error: &str) -> Value {
+    let evidence_error = json!({
+        "recording_failed": true,
+        "error": error,
+    });
+    match result {
+        Value::Object(mut object) => {
+            object.insert("evidence_error".to_string(), evidence_error);
+            Value::Object(object)
+        }
+        result => json!({
+            "result": result,
+            "evidence_error": evidence_error,
+        }),
+    }
 }
 
 fn sanitize_tool_result(
@@ -372,6 +399,18 @@ mod tests {
             evidence_kind_for_tool("checkpoint_restore"),
             "checkpoint_restored"
         );
+    }
+
+    #[test]
+    fn evidence_failure_is_explicit_without_changing_tool_outcome() {
+        let object = decorate_evidence_failure(json!({"state":"stopped"}), "disk full");
+        assert_eq!(object["state"], "stopped");
+        assert_eq!(object["evidence_error"]["recording_failed"], true);
+        assert_eq!(object["evidence_error"]["error"], "disk full");
+
+        let scalar = decorate_evidence_failure(Value::Null, "disk full");
+        assert!(scalar["result"].is_null());
+        assert_eq!(scalar["evidence_error"]["recording_failed"], true);
     }
 
     #[tokio::test]
