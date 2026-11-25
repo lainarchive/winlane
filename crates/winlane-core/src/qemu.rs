@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -32,6 +33,10 @@ const DISK_FILE: &str = "disk.qcow2";
 const QMP_SOCKET_FILE: &str = "qmp.sock";
 const QGA_SOCKET_FILE: &str = "qga.sock";
 const TPM_SOCKET_FILE: &str = "swtpm.sock";
+const QEMU_LOG_FILE: &str = "qemu.log";
+const SWTPM_LOG_FILE: &str = "swtpm.log";
+const MAX_LOG_TAIL_BYTES: u64 = 64 * 1024;
+const MAX_LOG_TAIL_LINES: usize = 1000;
 const TPM_DIR: &str = "tpm";
 const OVMF_VARS_FILE: &str = "ovmf-vars.fd";
 const MAX_SOCKET_PATH_BYTES: usize = 100;
@@ -309,12 +314,15 @@ impl QemuBackend {
         };
 
         let args = self.qemu_args(&mut record).await?;
+        let log_path = PathBuf::from(&record.handle.state_dir).join(QEMU_LOG_FILE);
+        let log_stdout = append_log_stdio(&log_path, "open qemu log").await?;
+        let log_stderr = append_log_stdio(&log_path, "open qemu log").await?;
         let mut command = Command::new(&self.qemu_binary);
         command
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(log_stdout)
+            .stderr(log_stderr)
             .kill_on_drop(true);
         let mut child = command.spawn().map_err(CoreError::io(
             "spawn qemu process",
@@ -368,6 +376,19 @@ impl QemuBackend {
             RunningMachine { child, qmp, swtpm },
         );
         Ok(())
+    }
+
+    pub async fn machine_logs(&self, machine: &MachineHandle, lines: usize) -> CoreResult<Value> {
+        let record = self.load_record(machine).await?;
+        let lines = lines.clamp(1, MAX_LOG_TAIL_LINES);
+        let state_dir = PathBuf::from(&record.handle.state_dir);
+        let qemu = tail_log(&state_dir.join(QEMU_LOG_FILE), lines).await?;
+        let swtpm = tail_log(&state_dir.join(SWTPM_LOG_FILE), lines).await?;
+        Ok(json!({
+            "machine": &record.handle,
+            "qemu_log": qemu,
+            "swtpm_log": swtpm,
+        }))
     }
 
     pub async fn stop_machine(&mut self, machine: &MachineHandle) -> CoreResult<()> {
@@ -1338,14 +1359,17 @@ impl QemuBackend {
                 "TPM state paths containing commas are not supported",
             ));
         }
+        let log_path = PathBuf::from(&record.handle.state_dir).join(SWTPM_LOG_FILE);
+        let log_stdout = append_log_stdio(&log_path, "open swtpm log").await?;
+        let log_stderr = append_log_stdio(&log_path, "open swtpm log").await?;
         let mut child = Command::new(&self.swtpm_binary)
             .arg("socket")
             .arg(format!("--tpmstate=dir={tpm_state},mode=0600"))
             .arg(format!("--ctrl=type=unixio,path={tpm_socket},mode=0600"))
             .arg("--tpm2")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(log_stdout)
+            .stderr(log_stderr)
             .kill_on_drop(true)
             .spawn()
             .map_err(CoreError::io("spawn swtpm", self.swtpm_binary.clone()))?;
@@ -1747,6 +1771,64 @@ async fn wait_for_child(child: &mut Child, duration: Duration) -> CoreResult<boo
         Ok(Err(error)) => Err(CoreError::io("wait for qemu process", "qemu")(error)),
         Err(_) => Ok(false),
     }
+}
+
+async fn append_log_stdio(path: &Path, operation: &'static str) -> CoreResult<Stdio> {
+    let file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .map_err(CoreError::io(operation, path))?;
+    Ok(Stdio::from(file.into_std().await))
+}
+
+async fn tail_log(path: &Path, max_lines: usize) -> CoreResult<Value> {
+    if !tokio::fs::try_exists(path)
+        .await
+        .map_err(CoreError::io("check machine log", path))?
+    {
+        return Ok(json!({
+            "path": path,
+            "present": false,
+            "lines": [],
+            "truncated": false,
+        }));
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(CoreError::io("open machine log", path))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(CoreError::io("read machine log metadata", path))?
+        .len();
+    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(CoreError::io("seek machine log", path))?;
+    let mut bytes = Vec::new();
+    file.take(len - start)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(CoreError::io("read machine log", path))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines().collect::<Vec<_>>();
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let omitted_lines = lines.len().saturating_sub(max_lines);
+    let lines = lines
+        .into_iter()
+        .skip(omitted_lines)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "path": path,
+        "present": true,
+        "lines": lines,
+        "truncated": start > 0 || omitted_lines > 0,
+    }))
 }
 
 async fn run_quiet_command(command: &mut Command, operation: &'static str) -> CoreResult<()> {
@@ -2926,6 +3008,65 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(backend.list_checkpoints(&handle).await.unwrap(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn machine_logs_rejects_state_dir_outside_backend_root() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let backend = QemuBackend::new(root.path()).await.expect("backend");
+        let outside = tempfile::tempdir().expect("outside root");
+        let handle = MachineHandle {
+            id: "machine-1".into(),
+            name: "builder".into(),
+            state_dir: outside.path().to_string_lossy().into_owned(),
+            backend: "qemu".into(),
+            state: MachineState::Defined,
+        };
+        let error = backend
+            .machine_logs(&handle, 10)
+            .await
+            .expect_err("outside state dir must be rejected");
+        assert!(matches!(error, CoreError::InvalidHandle(_)));
+    }
+
+    #[tokio::test]
+    async fn machine_log_tail_is_bounded_and_reports_missing_logs() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("qemu.log");
+        let contents = (0..20)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(&path, format!("{contents}\n"))
+            .await
+            .unwrap();
+        let tail = tail_log(&path, 3).await.expect("tail log");
+        assert_eq!(tail["present"], true);
+        assert_eq!(tail["truncated"], true);
+        assert_eq!(
+            tail["lines"].as_array().unwrap(),
+            &vec![json!("line-17"), json!("line-18"), json!("line-19")]
+        );
+        let missing = tail_log(&root.path().join("missing.log"), 3)
+            .await
+            .expect("missing log");
+        assert_eq!(missing["present"], false);
+        assert_eq!(missing["lines"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn machine_log_tail_caps_long_files_by_bytes() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("qemu.log");
+        let mut contents = "old-start\n".to_string();
+        contents.push_str(&"x".repeat((MAX_LOG_TAIL_BYTES + 128) as usize));
+        contents.push_str("\nlast\n");
+        tokio::fs::write(&path, contents).await.unwrap();
+        let tail = tail_log(&path, 10).await.expect("tail log");
+        assert_eq!(tail["truncated"], true);
+        let lines = tail["lines"].as_array().unwrap();
+        assert_eq!(lines.last(), Some(&json!("last")));
+        assert!(lines.iter().all(|line| line != "old-start"));
     }
 
     #[test]

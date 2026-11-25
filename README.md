@@ -232,6 +232,15 @@ cargo run --release -p winlane-cli -- machine wait \
   --timeout-seconds 120
 ```
 
+QEMU writes `qemu.log` under the machine state directory; when TPM is enabled, swtpm writes `swtpm.log`. Both append across machine restarts. Read a bounded structured tail with:
+
+```sh
+cargo run --release -p winlane-cli -- machine logs \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1 \
+  --lines 100
+```
+
 ## Use the semantic guest plane
 
 Run a process:

@@ -53,6 +53,10 @@ pub enum ControlRequest {
     GuestAgentReady {
         machine: MachineHandle,
     },
+    MachineLogs {
+        machine: MachineHandle,
+        lines: usize,
+    },
     CloneMachine {
         machine: MachineHandle,
         name: String,
@@ -302,6 +306,9 @@ async fn dispatch(
         ControlRequest::GuestAgentReady { .. } => Err(CoreError::InvalidHandle(
             "guest readiness dispatch invariant violated".to_string(),
         )),
+        ControlRequest::MachineLogs { machine, lines } => {
+            backend.machine_logs(&machine, lines).await
+        }
         ControlRequest::CloneMachine { machine, name } => backend
             .clone_machine(&machine, &name)
             .await

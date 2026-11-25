@@ -129,10 +129,20 @@ fn spec(name: &str) -> MachineSpec {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
     let root = tempfile::tempdir().expect("temporary machine root");
+    let logging_fixture = write_executable_fixture(
+        root.path(),
+        "fake_qemu_logging.py",
+        std::fs::read_to_string(fixture("fake_qemu_system.py"))
+            .expect("read fake qemu fixture")
+            .replace(
+                "def main():\n",
+                "def main():\n    print(\"fake qemu starting\", file=sys.stderr, flush=True)\n",
+            ),
+    );
     let mut backend = QemuBackend::new(root.path())
         .await
         .expect("backend")
-        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+        .with_qemu_binaries(logging_fixture, fixture("fake_qemu_img.py"));
 
     let machine = backend
         .create_machine(&spec("controltest"))
@@ -149,6 +159,20 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
         backend.status_machine(&machine).await.expect("status"),
         MachineState::Running
     );
+    assert!(root.path().join("controltest/qemu.log").is_file());
+    let logs = backend
+        .machine_logs(&machine, 10)
+        .await
+        .expect("machine logs");
+    assert_eq!(logs["qemu_log"]["present"], true);
+    assert!(
+        logs["qemu_log"]["lines"]
+            .as_array()
+            .expect("qemu log lines")
+            .iter()
+            .any(|line| line == "fake qemu starting")
+    );
+    assert_eq!(logs["swtpm_log"]["present"], false);
 
     let frame = backend
         .capture_frame(&machine)

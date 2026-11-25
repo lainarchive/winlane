@@ -97,6 +97,15 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
             Ok(MachineCommand::Status(resolve_machine_args(args).await?))
         }
         MachineCommand::Wait(args) => Ok(MachineCommand::Wait(args.clone())),
+        MachineCommand::Logs(args) => {
+            let machine =
+                resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
+                    .await?;
+            let mut args = args.clone();
+            args.machine_json = Some(serde_json::to_string(&machine)?);
+            args.machine_name = None;
+            Ok(MachineCommand::Logs(args))
+        }
         MachineCommand::Destroy(args) => {
             Ok(MachineCommand::Destroy(resolve_machine_args(args).await?))
         }
@@ -234,6 +243,18 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
                 args.control_socket.clone(),
                 ControlRequest::GuestAgentReady {
                     machine: serde_json::from_str(machine_json)?,
+                },
+            ))
+        }
+        MachineCommand::Logs(args) => {
+            let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+                crate::CliError::Usage("machine JSON missing after resolution".to_string())
+            })?;
+            Ok((
+                args.control_socket.clone(),
+                ControlRequest::MachineLogs {
+                    machine: serde_json::from_str(machine_json)?,
+                    lines: args.lines,
                 },
             ))
         }
@@ -535,6 +556,22 @@ mod tests {
             assert_eq!(encoded["machine"]["id"], "machine-1");
             assert_eq!(encoded["machine"]["state"], "stopped");
         }
+    }
+
+    #[test]
+    fn logs_request_uses_exact_ipc_operation_and_line_bound() {
+        let machine = machine_args();
+        let args = crate::args::LogsArgs {
+            control_socket: machine.control_socket.clone(),
+            machine_json: machine.machine_json.clone(),
+            machine_name: None,
+            lines: 25,
+        };
+        let (_socket, request) = machine_request(&MachineCommand::Logs(args)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "machine_logs");
+        assert_eq!(encoded["lines"], 25);
+        assert_eq!(encoded["machine"]["id"], "machine-1");
     }
 
     #[test]
