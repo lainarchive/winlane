@@ -905,7 +905,6 @@ fn validate_member_component(name: &str) -> UiaResult<()> {
             | "LPT9"
     );
     let invalid = name.is_empty()
-        || !name.is_ascii()
         || name.len() > 240
         || reserved
         || name
@@ -969,14 +968,95 @@ fn write_tar_header(
     size: u64,
     mtime: u64,
 ) -> UiaResult<()> {
-    let mut header = [0_u8; TAR_BLOCK_BYTES];
     let path = if directory {
         format!("{path}/")
     } else {
         path.to_owned()
     };
+    let needs_pax = !path.is_ascii() || split_ustar_path(&path).is_none();
+    let ustar_path = if needs_pax {
+        write_pax_path_header(writer, &path, mtime)?;
+        if split_ustar_path(&path).is_some() {
+            path.clone()
+        } else {
+            fallback_ustar_path(&path, directory)
+        }
+    } else {
+        path.clone()
+    };
+    write_ustar_header(
+        writer,
+        &ustar_path,
+        directory,
+        size,
+        mtime,
+        if directory { b'5' } else { b'0' },
+    )
+}
+
+fn write_pax_path_header(writer: &mut impl Write, path: &str, mtime: u64) -> UiaResult<()> {
+    let record = pax_record("path", path);
+    write_ustar_header(
+        writer,
+        &pax_header_name(path),
+        false,
+        record.len() as u64,
+        mtime,
+        b'x',
+    )?;
+    writer
+        .write_all(&record)
+        .map_err(|error| UiaError::HostIo {
+            path: "workspace archive".to_owned(),
+            source: error,
+        })?;
+    write_tar_padding(writer, record.len() as u64).map_err(|error| UiaError::HostIo {
+        path: "workspace archive".to_owned(),
+        source: error,
+    })
+}
+
+fn pax_record(key: &str, value: &str) -> Vec<u8> {
+    let mut digits = 1_usize;
+    loop {
+        let length = digits + 1 + key.len() + 1 + value.len() + 1;
+        let actual_digits = length.to_string().len();
+        if actual_digits == digits {
+            return format!("{length} {key}={value}\n").into_bytes();
+        }
+        digits = actual_digits;
+    }
+}
+
+fn archive_path_digest(path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    hex_digest(hasher)[..16].to_owned()
+}
+
+fn pax_header_name(path: &str) -> String {
+    format!("PaxHeader/winlane-{}", archive_path_digest(path))
+}
+
+fn fallback_ustar_path(path: &str, directory: bool) -> String {
+    let mut fallback = format!("winlane-path-{}", archive_path_digest(path));
+    if directory {
+        fallback.push('/');
+    }
+    fallback
+}
+
+fn write_ustar_header(
+    writer: &mut impl Write,
+    path: &str,
+    directory: bool,
+    size: u64,
+    mtime: u64,
+    typeflag: u8,
+) -> UiaResult<()> {
+    let mut header = [0_u8; TAR_BLOCK_BYTES];
     let (prefix, name) =
-        split_ustar_path(&path).ok_or_else(|| UiaError::UnsafeArchiveEntry(path.clone()))?;
+        split_ustar_path(path).ok_or_else(|| UiaError::UnsafeArchiveEntry(path.to_owned()))?;
     write_bytes(&mut header[0..100], name.as_bytes());
     if let Some(prefix) = prefix {
         write_bytes(&mut header[345..500], prefix.as_bytes());
@@ -989,7 +1069,7 @@ fn write_tar_header(
     for byte in &mut header[148..156] {
         *byte = b' ';
     }
-    header[156] = if directory { b'5' } else { b'0' };
+    header[156] = typeflag;
     write_bytes(&mut header[257..263], b"ustar\0");
     write_bytes(&mut header[263..265], b"00");
     let checksum = header.iter().map(|byte| u64::from(*byte)).sum::<u64>();
@@ -1702,13 +1782,73 @@ mod tests {
     }
 
     #[test]
-    fn workspace_archive_rejects_non_ascii_source_entries() {
+    fn workspace_archive_unicode_names_use_pax_and_round_trip() {
+        let temp = TestTempDir::new();
+        let source = temp.path.join("source");
+        let unicode_dir = source.join("unicode-é");
+        fs::create_dir_all(&unicode_dir).unwrap();
+        fs::write(unicode_dir.join("日程🙂.txt"), "unicode content".as_bytes()).unwrap();
+        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let bytes = fs::read(&archive.path).unwrap();
+        assert_eq!(bytes[156], b'x');
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("path=unicode-é/"));
+        assert!(text.contains("path=unicode-é/日程🙂.txt"));
+
+        let target = temp.path.join("target");
+        fs::create_dir(&target).unwrap();
+        extract_workspace_archive(&archive.path, &target, ArchiveLimits::default()).unwrap();
+        assert_eq!(
+            fs::read(target.join("unicode-é/日程🙂.txt")).unwrap(),
+            b"unicode content"
+        );
+    }
+
+    #[test]
+    fn workspace_archive_unrepresentable_long_name_uses_pax_and_round_trips() {
         let temp = TestTempDir::new();
         let source = temp.path.join("source");
         fs::create_dir(&source).unwrap();
-        fs::write(source.join("unicode-ä.txt"), b"unicode").unwrap();
-        let result = create_workspace_archive(&source);
-        assert!(matches!(result, Err(UiaError::UnsafeArchiveEntry(_))));
+        let name = "a".repeat(120);
+        fs::write(source.join(&name), b"long").unwrap();
+        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let bytes = fs::read(&archive.path).unwrap();
+        assert_eq!(bytes[156], b'x');
+        assert!(String::from_utf8_lossy(&bytes).contains("winlane-path-"));
+
+        let target = temp.path.join("target");
+        fs::create_dir(&target).unwrap();
+        extract_workspace_archive(&archive.path, &target, ArchiveLimits::default()).unwrap();
+        assert_eq!(fs::read(target.join(name)).unwrap(), b"long");
+    }
+
+    #[test]
+    fn workspace_archive_ascii_representable_name_stays_plain_ustar() {
+        let temp = TestTempDir::new();
+        let source = temp.path.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("ascii.txt"), b"ascii").unwrap();
+        let (archive, _) = create_workspace_archive(&source).unwrap();
+        let bytes = fs::read(&archive.path).unwrap();
+        assert_eq!(bytes[156], b'0');
+        assert!(
+            !bytes
+                .windows(b"PaxHeader".len())
+                .any(|window| window == b"PaxHeader")
+        );
+    }
+
+    #[test]
+    fn archive_extraction_uses_utf8_pax_path() {
+        let temp = TestTempDir::new();
+        let target = temp.path.join("target");
+        fs::create_dir(&target).unwrap();
+        let pax = pax_record("path", "unicode-é/雪.txt");
+        let mut archive = make_archive_entry("PaxHeader/test", b'x', &pax);
+        archive.extend(make_archive_entry("winlane-path-fallback", b'0', b"data"));
+        let archive = finish_archive(archive);
+        extract_bytes(&archive, &target).unwrap();
+        assert_eq!(fs::read(target.join("unicode-é/雪.txt")).unwrap(), b"data");
     }
 
     #[cfg(unix)]
