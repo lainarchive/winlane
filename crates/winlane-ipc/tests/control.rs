@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::json;
@@ -27,6 +28,35 @@ fn spec(name: &str) -> MachineSpec {
         tpm: false,
         boot: BootMode::Bios,
     }
+}
+
+fn owner_mode(path: &Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("artifact metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_socket_and_created_parent_use_owner_only_permissions() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let socket_path = root.path().join("private-parent").join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix_control(server_socket, backend).await });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(owner_mode(socket_path.parent().unwrap()), 0o700);
+    assert_eq!(owner_mode(&socket_path), 0o600);
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

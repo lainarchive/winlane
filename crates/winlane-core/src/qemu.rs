@@ -94,7 +94,10 @@ pub struct QemuBackend {
 impl QemuBackend {
     pub async fn new(root_dir: impl Into<PathBuf>) -> CoreResult<Self> {
         let root_dir = root_dir.into();
-        tokio::fs::create_dir_all(&root_dir)
+        let mut builder = tokio::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(&root_dir)
             .await
             .map_err(CoreError::io("create machine root", &root_dir))?;
         let root_dir = tokio::fs::canonicalize(&root_dir)
@@ -250,6 +253,7 @@ impl QemuBackend {
             let disk_path = state_dir.join(DISK_FILE);
             self.run_qemu_img_create(&disk_path, backing_path.as_deref(), spec.disk_gb)
                 .await?;
+            set_private_file(&disk_path).await?;
 
             let tpm_state_dir = if spec.tpm {
                 let dir = state_dir.join(TPM_DIR);
@@ -339,6 +343,22 @@ impl QemuBackend {
                 return Err(error);
             }
         };
+        let permissions_result = async {
+            set_private_file(&record.qmp_socket_path).await?;
+            if let Some(qga_socket) = &record.qga_socket_path {
+                set_private_file_if_exists(qga_socket).await?;
+            }
+            set_private_file_if_exists(&PathBuf::from(&record.handle.state_dir).join("qemu.pid"))
+                .await
+        }
+        .await;
+        if let Err(error) = permissions_result {
+            let _ = child.kill().await;
+            if let Some(process) = &mut swtpm {
+                let _ = process.kill().await;
+            }
+            return Err(error);
+        }
 
         if let Some(snapshot) = record.pending_loadvm.clone() {
             let load_result: CoreResult<()> = async {
@@ -647,12 +667,7 @@ impl QemuBackend {
         let state_dir = PathBuf::from(&record.handle.state_dir);
         let checkpoint_id = format!("checkpoint-{}", Uuid::new_v4().simple());
         let checkpoint_dir = state_dir.join(CHECKPOINT_DIR).join(&checkpoint_id);
-        tokio::fs::create_dir_all(&checkpoint_dir)
-            .await
-            .map_err(CoreError::io(
-                "create checkpoint directory",
-                &checkpoint_dir,
-            ))?;
+        create_private_dir(&checkpoint_dir, "create checkpoint directory").await?;
         let result = self
             .checkpoint_machine_inner(machine, label, &checkpoint_id, &checkpoint_dir, record)
             .await;
@@ -1198,6 +1213,7 @@ impl QemuBackend {
                 tokio::fs::copy(&vars_template, &vars_path)
                     .await
                     .map_err(CoreError::io("copy firmware vars", &vars_path))?;
+                set_private_file(&vars_path).await?;
             }
             record.ovmf_vars_path = Some(vars_path.clone());
             args.extend([
@@ -1795,6 +1811,7 @@ async fn append_log_stdio(path: &Path, operation: &'static str) -> CoreResult<St
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(path)
         .await
         .map_err(CoreError::io(operation, path))?;
@@ -1890,7 +1907,9 @@ async fn write_json(path: &Path, value: &impl Serialize) -> CoreResult<()> {
 }
 
 async fn create_machine_state_dir(path: &Path, name: &str) -> CoreResult<()> {
-    match tokio::fs::create_dir(path).await {
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(path).await {
         Ok(()) => tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .await
             .map_err(CoreError::io("create machine state directory", path)),
@@ -1902,7 +1921,10 @@ async fn create_machine_state_dir(path: &Path, name: &str) -> CoreResult<()> {
 }
 
 async fn create_private_dir(path: &Path, operation: &'static str) -> CoreResult<()> {
-    tokio::fs::create_dir_all(path)
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder
+        .create(path)
         .await
         .map_err(CoreError::io(operation, path))?;
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
@@ -1914,6 +1936,16 @@ async fn set_private_file(path: &Path) -> CoreResult<()> {
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .await
         .map_err(CoreError::io("set private file permissions", path))
+}
+
+async fn set_private_file_if_exists(path: &Path) -> CoreResult<()> {
+    if tokio::fs::try_exists(path)
+        .await
+        .map_err(CoreError::io("check private file", path))?
+    {
+        set_private_file(path).await?;
+    }
+    Ok(())
 }
 
 fn qemu_option_escape(value: &str) -> String {
@@ -2261,6 +2293,7 @@ async fn copy_optional_file(source: Option<&Path>, target: &Path) -> CoreResult<
     tokio::fs::copy(source, target)
         .await
         .map_err(CoreError::io("copy firmware state", target))?;
+    set_private_file(target).await?;
     Ok(true)
 }
 
@@ -2309,6 +2342,7 @@ async fn replace_file_atomically(source: &Path, target: &Path) -> CoreResult<()>
     tokio::fs::copy(source, &staging)
         .await
         .map_err(CoreError::io("stage restored file", &staging))?;
+    set_private_file(&staging).await?;
     if let Err(error) = tokio::fs::rename(&staging, target).await {
         let _ = tokio::fs::remove_file(&staging).await;
         return Err(CoreError::io("replace restored file", target)(error));
@@ -2348,9 +2382,7 @@ async fn replace_dir_contents(source: &Path, target: &Path) -> CoreResult<()> {
 async fn copy_dir_all(source: &Path, target: &Path) -> CoreResult<()> {
     let mut stack = vec![(source.to_path_buf(), target.to_path_buf())];
     while let Some((source_dir, target_dir)) = stack.pop() {
-        tokio::fs::create_dir_all(&target_dir)
-            .await
-            .map_err(CoreError::io("create copied directory", &target_dir))?;
+        create_private_dir(&target_dir, "create copied directory").await?;
         let mut entries = tokio::fs::read_dir(&source_dir)
             .await
             .map_err(CoreError::io("read copied directory", &source_dir))?;
@@ -2376,6 +2408,7 @@ async fn copy_dir_all(source: &Path, target: &Path) -> CoreResult<()> {
                 tokio::fs::copy(&entry_path, &target_path)
                     .await
                     .map_err(CoreError::io("copy checkpoint file", &target_path))?;
+                set_private_file(&target_path).await?;
             }
         }
     }

@@ -126,6 +126,54 @@ fn spec(name: &str) -> MachineSpec {
     }
 }
 
+fn owner_mode(path: &Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("artifact metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_state_artifacts_use_owner_only_permissions() {
+    let temp = tempfile::tempdir().expect("temporary root parent");
+    let root = temp.path().join("machines");
+    let mut backend = QemuBackend::new(&root)
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let mut machine_spec = spec("private");
+    machine_spec.guest_agent = true;
+    let machine = backend
+        .create_machine(&machine_spec)
+        .await
+        .expect("create machine");
+    let state_dir = root.join("private");
+    assert_eq!(owner_mode(&root), 0o700);
+    assert_eq!(owner_mode(&state_dir), 0o700);
+    assert_eq!(owner_mode(&state_dir.join("machine.json")), 0o600);
+    assert_eq!(owner_mode(&state_dir.join("spec.json")), 0o600);
+    assert_eq!(owner_mode(&state_dir.join("disk.qcow2")), 0o600);
+
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    assert_eq!(owner_mode(&state_dir.join("qemu.log")), 0o600);
+    assert_eq!(owner_mode(&state_dir.join("qmp.sock")), 0o600);
+    assert_eq!(owner_mode(&state_dir.join("qga.sock")), 0o600);
+    assert_eq!(owner_mode(&state_dir.join("qemu.pid")), 0o600);
+    backend.stop_machine(&machine).await.expect("stop machine");
+    let checkpoint = backend
+        .checkpoint_machine(&machine, "private")
+        .await
+        .expect("create checkpoint");
+    let checkpoint_dir = state_dir.join("checkpoints").join(&checkpoint.id);
+    assert_eq!(owner_mode(&state_dir.join("checkpoints")), 0o700);
+    assert_eq!(owner_mode(&checkpoint_dir), 0o700);
+    assert_eq!(owner_mode(&checkpoint_dir.join("checkpoint.json")), 0o600);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
     let root = tempfile::tempdir().expect("temporary machine root");

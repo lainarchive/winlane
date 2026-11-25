@@ -4,6 +4,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,6 +50,34 @@ impl EvidenceError {
 
 pub type EvidenceResult<T> = Result<T, EvidenceError>;
 
+fn create_private_dir_all(path: &Path) -> EvidenceResult<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(EvidenceError::io(path))
+}
+
+fn create_private_file(path: &Path) -> EvidenceResult<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(EvidenceError::io(path))
+}
+
+fn set_private_file_if_new(path: &Path, existed: bool) -> EvidenceResult<()> {
+    if existed {
+        return Ok(());
+    }
+    let mut permissions = fs::metadata(path)
+        .map_err(EvidenceError::io(path))?
+        .permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions).map_err(EvidenceError::io(path))
+}
+
 #[derive(Debug)]
 pub struct EvidenceStore {
     root: PathBuf,
@@ -60,12 +89,12 @@ pub struct EvidenceStore {
 impl EvidenceStore {
     pub fn create(root: impl AsRef<Path>) -> EvidenceResult<Self> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join(BLOBS_DIR)).map_err(EvidenceError::io(root.clone()))?;
+        create_private_dir_all(&root.join(BLOBS_DIR))?;
         let events_path = root.join(EVENTS_FILE);
         if events_path.exists() {
             return Self::open(root);
         }
-        File::create_new(&events_path).map_err(EvidenceError::io(&events_path))?;
+        create_private_file(&events_path)?;
         Ok(Self {
             events_path,
             blobs_dir: root.join(BLOBS_DIR),
@@ -78,9 +107,9 @@ impl EvidenceStore {
         let root = root.as_ref().to_path_buf();
         let events_path = root.join(EVENTS_FILE);
         let blobs_dir = root.join(BLOBS_DIR);
-        fs::create_dir_all(&blobs_dir).map_err(EvidenceError::io(&blobs_dir))?;
+        create_private_dir_all(&blobs_dir)?;
         if !events_path.exists() {
-            File::create_new(&events_path).map_err(EvidenceError::io(&events_path))?;
+            create_private_file(&events_path)?;
         }
 
         let file = File::open(&events_path).map_err(EvidenceError::io(&events_path))?;
@@ -197,7 +226,9 @@ impl EvidenceStore {
             unix_ms_now(),
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::write(&tmp_path, bytes).map_err(EvidenceError::io(&tmp_path))?;
+        create_private_file(&tmp_path)?
+            .write_all(bytes)
+            .map_err(EvidenceError::io(&tmp_path))?;
         fs::rename(&tmp_path, &final_path).map_err(EvidenceError::io(&final_path))?;
         Ok(sha256)
     }
@@ -210,7 +241,7 @@ impl EvidenceStore {
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let result = (|| {
-            let mut file = File::create(&tmp_path).map_err(EvidenceError::io(&tmp_path))?;
+            let mut file = create_private_file(&tmp_path)?;
             let mut hasher = Sha256::new();
             let mut buffer = [0_u8; 64 * 1024];
             loop {
@@ -263,9 +294,11 @@ impl EvidenceStore {
     pub fn export_jsonl(&self, destination: impl AsRef<Path>) -> EvidenceResult<()> {
         let destination = destination.as_ref();
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(EvidenceError::io(parent))?;
+            create_private_dir_all(parent)?;
         }
+        let existed = destination.exists();
         fs::copy(&self.events_path, destination).map_err(EvidenceError::io(destination))?;
+        set_private_file_if_new(destination, existed)?;
         Ok(())
     }
 }
@@ -410,6 +443,23 @@ mod tests {
             store.append_event(event),
             Err(EvidenceError::SequenceConflict { .. })
         ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn owner_mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn store_and_blob_artifacts_use_owner_only_permissions() {
+        let root = temp_root("permissions");
+        fs::remove_dir_all(&root).unwrap();
+        let store = EvidenceStore::create(&root).unwrap();
+        assert_eq!(owner_mode(&root), 0o700);
+        assert_eq!(owner_mode(&root.join(EVENTS_FILE)), 0o600);
+        assert_eq!(owner_mode(&root.join(BLOBS_DIR)), 0o700);
+        let sha = store.put_blob(b"screen").unwrap();
+        assert_eq!(owner_mode(&store.blob_path(&sha).unwrap()), 0o600);
         let _ = fs::remove_dir_all(root);
     }
 

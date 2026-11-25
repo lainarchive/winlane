@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -20,6 +21,21 @@ pub fn run_evidence_command(command: &EvidenceCommand, output: &mut impl Write) 
     }
 }
 
+fn create_private_dir_all(path: &Path) -> CliResult<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    Ok(())
+}
+
+fn set_private_file(path: &Path) -> CliResult<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    std::fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
 fn export(args: &EvidenceExportArgs, output: &mut impl Write) -> CliResult<()> {
     if args.output.as_os_str().is_empty() {
         return Err(CliError::Usage("output path must be nonempty".to_string()));
@@ -34,13 +50,14 @@ fn export(args: &EvidenceExportArgs, output: &mut impl Write) -> CliResult<()> {
             )));
         }
     }
-    std::fs::create_dir_all(&args.output)?;
+    create_private_dir_all(&args.output)?;
     let events_output = args.output.join("events.jsonl");
     std::fs::copy(args.evidence_dir.join("events.jsonl"), &events_output)?;
+    set_private_file(&events_output)?;
     let events_bytes = std::fs::metadata(&events_output)?.len();
 
     let blobs_output = args.output.join("blobs");
-    std::fs::create_dir_all(&blobs_output)?;
+    create_private_dir_all(&blobs_output)?;
     let mut blob_count = 0_u64;
     let mut blob_bytes = 0_u64;
     let blobs_input = args.evidence_dir.join("blobs");
@@ -57,7 +74,8 @@ fn export(args: &EvidenceExportArgs, output: &mut impl Write) -> CliResult<()> {
             });
             if file_type.is_file() && valid_blob_name {
                 let target = blobs_output.join(&name);
-                blob_bytes += std::fs::copy(entry.path(), target)?;
+                blob_bytes += std::fs::copy(entry.path(), &target)?;
+                set_private_file(&target)?;
                 blob_count += 1;
             }
         }
@@ -478,6 +496,11 @@ mod tests {
         );
         assert!(!output_path.join("blobs").join(".tmp-ignore").exists());
         assert!(output.ends_with(b"\n"));
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&output_path), 0o700);
+        assert_eq!(mode(&output_path.join("events.jsonl")), 0o600);
+        assert_eq!(mode(&output_path.join("blobs")), 0o700);
+        assert_eq!(mode(&output_path.join("blobs").join(&blob_name)), 0o600);
     }
 
     fn verify_output(evidence_dir: &Path) -> (CliResult<()>, Value) {

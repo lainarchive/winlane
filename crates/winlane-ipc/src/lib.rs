@@ -176,7 +176,9 @@ pub async fn serve_unix_control(
         }
     }
     if let Some(parent) = socket_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        let mut builder = tokio::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(parent).await?;
     }
     let listener = UnixListener::bind(socket_path)?;
     tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await?;
