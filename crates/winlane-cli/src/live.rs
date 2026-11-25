@@ -28,6 +28,29 @@ use crate::{CliError, CliResult, ViewArgs};
 
 const INPUT_POLL_QUANTUM: Duration = Duration::from_millis(10);
 
+fn advance_capture_tick(scheduled: Instant, now: Instant, interval: Duration) -> Instant {
+    if now < scheduled {
+        return scheduled;
+    }
+    let interval_ns = interval.as_nanos();
+    if interval_ns == 0 {
+        return now;
+    }
+    let elapsed_ns = now.duration_since(scheduled).as_nanos();
+    let ticks = elapsed_ns / interval_ns + 1;
+    let advance_ns = interval_ns.saturating_mul(ticks);
+    let advance = Duration::from_nanos(advance_ns.min(u64::MAX as u128) as u64);
+    scheduled.checked_add(advance).unwrap_or(now)
+}
+
+fn input_sleep_duration(now: Instant, next_capture: Instant) -> Duration {
+    next_capture
+        .checked_duration_since(now)
+        .map_or(Duration::ZERO, |remaining| {
+            remaining.min(INPUT_POLL_QUANTUM)
+        })
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveViewConfig {
     pub control_socket: PathBuf,
@@ -182,13 +205,14 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
                     sha256: captured.sha256,
                 });
             }
-            next_capture = Instant::now() + config.frame_interval;
+            next_capture =
+                advance_capture_tick(next_capture, Instant::now(), config.frame_interval);
         }
 
         if session.drain_events(last_frame.as_ref()).await? {
             return Ok(());
         }
-        tokio::time::sleep(INPUT_POLL_QUANTUM).await;
+        tokio::time::sleep(input_sleep_duration(Instant::now(), next_capture)).await;
     }
 }
 
@@ -505,6 +529,56 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn future_capture_tick_is_unchanged() {
+        let now = Instant::now();
+        let scheduled = now + Duration::from_millis(100);
+        assert_eq!(
+            advance_capture_tick(scheduled, now, Duration::from_millis(200)),
+            scheduled
+        );
+    }
+
+    #[test]
+    fn capture_tick_preserves_cadence() {
+        let scheduled = Instant::now();
+        let now = scheduled + Duration::from_millis(150);
+        assert_eq!(
+            advance_capture_tick(scheduled, now, Duration::from_millis(200)),
+            scheduled + Duration::from_millis(200)
+        );
+    }
+
+    #[test]
+    fn overrun_skips_to_next_future_tick() {
+        let scheduled = Instant::now();
+        let now = scheduled + Duration::from_millis(850);
+        assert_eq!(
+            advance_capture_tick(scheduled, now, Duration::from_millis(200)),
+            scheduled + Duration::from_millis(1000)
+        );
+    }
+
+    #[test]
+    fn input_sleep_is_capped_by_poll_quantum() {
+        let now = Instant::now();
+        assert_eq!(
+            input_sleep_duration(now, now + Duration::from_secs(1)),
+            INPUT_POLL_QUANTUM
+        );
+    }
+
+    #[test]
+    fn input_sleep_uses_sooner_capture_time() {
+        let now = Instant::now();
+        assert_eq!(
+            input_sleep_duration(now, now + Duration::from_millis(3)),
+            Duration::from_millis(3)
+        );
+        assert_eq!(input_sleep_duration(now, now), Duration::ZERO);
+    }
+
     #[test]
     fn control_q_maps_to_detach_binding() {
         let event = CrosstermKeyEvent::new_with_kind(
