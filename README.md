@@ -4,8 +4,6 @@ Disposable Windows machines for coding agents, visible and controllable from a t
 
 winlane is local-first. It provisions Windows into a golden qcow2 image, boots copy-on-write machines under QEMU/KVM, exposes the display in a terminal, and gives agents two control planes: hardware input through QMP and semantic Windows UI Automation through the guest agent.
 
-![Time-compressed winlane demo: a real Windows machine in the left terminal pane, controlled through the CLI and MCP driver in the right pane](docs/assets/winlane-demo-highlight.gif)
-
 The only currently supported host path is narrow on purpose: Linux x86_64, KVM, QEMU, Windows 11 x64, UEFI, swtpm, virtio drivers, isolated or QEMU user-mode NAT networking, and Kitty-protocol high-resolution terminal rendering with a clearly labeled half-block preview fallback. A native Windows Hyper-V backend is an architecture lane, not supported functionality yet.
 
 ## Why

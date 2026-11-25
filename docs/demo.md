@@ -68,6 +68,18 @@ Outputs:
 
 Once recording has started, the MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden. If the driver fails before interactive-desktop readiness, recording never starts and those capture artifacts do not exist.
 
+## README highlight asset audit
+
+The repository previously carried `docs/assets/winlane-demo-highlight.gif`, a 1280x720, 21.08-second, 253-frame, 12 fps, 4,221,306-byte edit. It showed selected jump cuts from a Windows 11 Enterprise Evaluation desktop in the left Kitty pane and real CLI/MCP driver output in the right pane. It visibly disclosed time compression, and the action labels were broadly consistent with the documented checkpoint sequence.
+
+It is not suitable as the primary onboarding artifact:
+
+- the Windows watermark reads `Windows license is expired`; evaluation media is time-limited, and an expired guest must not be presented as the normal validated product state;
+- no committed generation script, source MP4 hash, or capture-info manifest ties the GIF binary to the validated 145.234-second real-time recording, so the GIF cannot independently serve as validation provenance;
+- after the 1920x1080 source was reduced to 1280x720, further inline README scaling makes the right terminal transcript too small to audit; only the overlay captions and large Notepad text are reliably readable.
+
+A replacement may be added only when generated reproducibly from a current `record-x11.sh` real-time capture using unexpired licensed or evaluation media, with source capture SHA-256, exact edit commands, and time-compression/jump-cut disclosure committed or referenced. The real-time MP4 and capture metadata remain the evidence artifact; a short GIF is illustrative documentation only.
+
 ## Caveats
 
 - The golden image must already provision Windows, virtio drivers, QEMU Guest Agent, and the interactive user session used by winlane.
