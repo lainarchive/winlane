@@ -10,7 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use winlane_contracts::MachineState;
 use winlane_contracts::{CheckpointRef, ControlEvent, MachineHandle, MachineSpec};
 use winlane_core::{CoreError, CoreResult, QemuBackend};
@@ -73,6 +73,7 @@ pub enum ControlRequest {
     CaptureFrame {
         machine: MachineHandle,
     },
+    Shutdown,
     Control {
         machine: MachineHandle,
         event: ControlEvent,
@@ -173,6 +174,7 @@ pub async fn serve_unix_control(
     tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await?;
     let backend = Arc::new(Mutex::new(backend));
     let shutting_down = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
@@ -180,8 +182,9 @@ pub async fn serve_unix_control(
                 let (stream, _) = accepted?;
                 let backend = Arc::clone(&backend);
                 let shutting_down = Arc::clone(&shutting_down);
+                let shutdown_tx = shutdown_tx.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, backend, shutting_down).await;
+                    let _ = handle_connection(stream, backend, shutting_down, shutdown_tx).await;
                 });
             }
             interrupted = tokio::signal::ctrl_c() => {
@@ -191,6 +194,12 @@ pub async fn serve_unix_control(
             }
             terminated = terminate.recv() => {
                 if terminated.is_some() {
+                    shutting_down.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+            shutdown_requested = shutdown_rx.recv() => {
+                if shutdown_requested.is_some() {
                     shutting_down.store(true, Ordering::SeqCst);
                     break;
                 }
@@ -213,6 +222,7 @@ async fn handle_connection(
     stream: UnixStream,
     backend: Arc<Mutex<QemuBackend>>,
     shutting_down: Arc<AtomicBool>,
+    shutdown_tx: mpsc::Sender<()>,
 ) -> IpcResult<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -222,16 +232,25 @@ async fn handle_connection(
             Err(IpcError::Closed) => return Ok(()),
             Err(error) => return Err(error),
         };
-        let response = match serde_json::from_slice::<ControlRequest>(&bytes) {
+        let (response, shutdown_request) = match serde_json::from_slice::<ControlRequest>(&bytes) {
             Ok(request) => {
-                dispatch(request, Arc::clone(&backend), Arc::clone(&shutting_down)).await
+                let shutdown_request = matches!(request, ControlRequest::Shutdown);
+                let response =
+                    dispatch(request, Arc::clone(&backend), Arc::clone(&shutting_down)).await;
+                (response, shutdown_request)
             }
-            Err(error) => ControlResponse::failure(format!("invalid request: {error}")),
+            Err(error) => (
+                ControlResponse::failure(format!("invalid request: {error}")),
+                false,
+            ),
         };
         let mut encoded = serde_json::to_vec(&response)?;
         encoded.push(b'\n');
         write_half.write_all(&encoded).await?;
         write_half.flush().await?;
+        if shutdown_request && response.ok {
+            let _ = shutdown_tx.try_send(());
+        }
     }
 }
 
@@ -242,6 +261,10 @@ async fn dispatch(
 ) -> ControlResponse {
     if shutting_down.load(Ordering::SeqCst) {
         return ControlResponse::failure("control daemon is shutting down");
+    }
+    if matches!(request, ControlRequest::Shutdown) {
+        shutting_down.store(true, Ordering::SeqCst);
+        return ControlResponse::success(serde_json::json!({"shutdown":"initiated"}));
     }
     if let ControlRequest::GuestAgentReady { machine } = request {
         let result = guest_agent_ready(backend, machine).await;
@@ -296,6 +319,9 @@ async fn dispatch(
             .capture_frame(&machine)
             .await
             .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
+        ControlRequest::Shutdown => Err(CoreError::InvalidHandle(
+            "shutdown dispatch invariant violated".to_string(),
+        )),
         ControlRequest::Control { machine, event } => backend
             .send_control_event(&machine, &event)
             .await
@@ -415,6 +441,32 @@ mod tests {
             Some("control daemon is shutting down")
         );
     }
+
+    #[tokio::test]
+    async fn shutdown_dispatch_rejects_new_requests_after_success() {
+        let root = tempfile::tempdir().expect("temporary machine root");
+        let backend = QemuBackend::new(root.path()).await.expect("backend");
+        let backend = Arc::new(Mutex::new(backend));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let response = dispatch(
+            ControlRequest::Shutdown,
+            Arc::clone(&backend),
+            Arc::clone(&shutting_down),
+        )
+        .await;
+        assert!(response.ok);
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({"shutdown":"initiated"}))
+        );
+        let rejected = dispatch(ControlRequest::List, backend, shutting_down).await;
+        assert!(!rejected.ok);
+        assert_eq!(
+            rejected.error.as_deref(),
+            Some("control daemon is shutting down")
+        );
+    }
+
     #[tokio::test]
     async fn qga_probe_missing_socket_is_false() {
         let root = tempfile::tempdir().expect("temporary root");

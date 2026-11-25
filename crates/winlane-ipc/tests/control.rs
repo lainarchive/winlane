@@ -101,6 +101,49 @@ async fn unix_control_serializes_concurrent_clients() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_response_is_delivered_before_daemon_cleans_up_and_exits() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix_control(server_socket, backend).await });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let client = UnixControlClient::new(&socket_path);
+    let machine: MachineHandle = serde_json::from_value(
+        client
+            .invoke(&ControlRequest::Create {
+                spec: spec("ipcstop"),
+            })
+            .await
+            .expect("create over ipc"),
+    )
+    .expect("decode created machine");
+    client
+        .invoke(&ControlRequest::Start {
+            machine: machine.clone(),
+        })
+        .await
+        .expect("start over ipc");
+
+    let response = client
+        .invoke(&ControlRequest::Shutdown)
+        .await
+        .expect("shutdown response delivered");
+    assert_eq!(response, json!({"shutdown":"initiated"}));
+    server.await.expect("server task").expect("daemon shutdown");
+    assert!(!socket_path.exists());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_control_socket_file_is_replaced() {
     let root = tempfile::tempdir().expect("temporary machine root");

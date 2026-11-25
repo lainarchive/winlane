@@ -12,14 +12,14 @@ use std::io::Write as _;
 use thiserror::Error;
 
 pub use args::{
-    Command, CreateArgs, DaemonArgs, DoctorArgs, GuestCommand, MachineArgs, MachineCommand,
-    McpArgs, USAGE, VIEW_USAGE, ViewArgs, parse_args,
+    Command, CreateArgs, DaemonArgs, DaemonStopArgs, DoctorArgs, GuestCommand, MachineArgs,
+    MachineCommand, McpArgs, USAGE, VIEW_USAGE, ViewArgs, parse_args,
 };
 pub use doctor::run_doctor;
 pub use evidence::run_evidence_command;
 pub use guest::run_guest_command;
 pub use live::{LiveViewConfig, capture_transient_frame, run_live_view};
-pub use machine::{run_daemon, run_machine_command, run_mcp};
+pub use machine::{run_daemon, run_daemon_stop, run_machine_command, run_mcp};
 
 pub type CliResult<T> = Result<T, CliError>;
 
@@ -61,6 +61,11 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
         }
         Command::View(view) => run_live_view(LiveViewConfig::from_args(view).await?).await,
         Command::Daemon(daemon) => run_daemon(daemon).await,
+        Command::DaemonStop(daemon) => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_daemon_stop(&daemon, &mut output).await
+        }
         Command::Doctor(doctor) => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
