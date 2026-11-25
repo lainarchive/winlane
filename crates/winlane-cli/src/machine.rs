@@ -170,13 +170,17 @@ async fn resolve_machine_args(args: &MachineArgs) -> CliResult<MachineArgs> {
     Ok(args)
 }
 
+pub(crate) fn parse_machine_json_arg(machine_json: &str) -> CliResult<MachineHandle> {
+    serde_json::from_str(machine_json).map_err(|error| crate::CliError::Usage(error.to_string()))
+}
+
 pub(crate) async fn resolve_machine(
     control_socket: &std::path::Path,
     machine_json: &Option<String>,
     machine_name: &Option<String>,
 ) -> CliResult<MachineHandle> {
     if let Some(machine_json) = machine_json {
-        return Ok(serde_json::from_str(machine_json)?);
+        return parse_machine_json_arg(machine_json);
     }
     let Some(name) = machine_name else {
         return Err(crate::CliError::Usage(

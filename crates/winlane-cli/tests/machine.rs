@@ -540,3 +540,49 @@ async fn machine_wait_timeout_prints_result_and_fails_nonzero_path() {
     assert_eq!(output_json["state"], "stopped");
     assert_eq!(output_json["error"], "timeout");
 }
+
+#[tokio::test]
+async fn machine_wait_timeout_prints_json_and_exits_one() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind control socket");
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept control client");
+            let request = write_control_response(
+                stream,
+                serde_json::json!({"ready":false,"state":"stopped"}),
+            )
+            .await;
+            assert_eq!(
+                request,
+                ControlRequest::GuestAgentReady { machine: machine() }
+            );
+        }
+    });
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_winlane"))
+        .args(["machine", "wait", "--control-socket"])
+        .arg(socket_path)
+        .arg("--machine-json")
+        .arg(serde_json::to_string(&machine()).expect("encode machine"))
+        .args(["--for", "guest-agent", "--timeout-seconds", "1"])
+        .output()
+        .await
+        .expect("run winlane");
+    assert!(
+        !server.is_finished(),
+        "control server stopped before timeout"
+    );
+    server.abort();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        output.stderr,
+        b"winlane: timed out waiting for guest agent\n"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("decode output");
+    assert_eq!(report["ready"], false);
+    assert_eq!(report["for"], "guest-agent");
+    assert_eq!(report["state"], "stopped");
+    assert_eq!(report["error"], "timeout");
+}

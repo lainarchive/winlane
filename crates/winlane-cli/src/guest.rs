@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use winlane_contracts::{MachineHandle, UiNodeRef};
+use winlane_contracts::UiNodeRef;
 use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
 use winlane_guest::uia::{BlockingUiaControl, UiaView};
 
 use crate::CliError;
 use crate::CliResult;
 use crate::args::GuestCommand;
-use crate::machine::{resolve_machine, write_json_line};
+use crate::machine::{parse_machine_json_arg, resolve_machine, write_json_line};
 
 pub async fn run_guest_command(command: &GuestCommand, output: &mut impl Write) -> CliResult<()> {
     let operation = guest_operation(command)?;
@@ -113,7 +113,7 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
 }
 
 fn execute_guest_operation(machine_json: &str, operation: GuestOperation) -> CliResult<Value> {
-    let machine: MachineHandle = serde_json::from_str(machine_json)?;
+    let machine = parse_machine_json_arg(machine_json)?;
     let qga_socket = PathBuf::from(machine.state_dir).join("qga.sock");
     let transport = UnixQgaTransport::connect(qga_socket, Duration::from_secs(5))?;
     let mut control = BlockingUiaControl::new(QgaClient::new(transport));
