@@ -626,7 +626,7 @@ fn validate_absolute_windows_command(command: &str) -> UiaResult<()> {
 }
 
 fn validate_guest_file_path(path: &str) -> UiaResult<()> {
-    if !path.is_empty() && path.len() <= 32_767 && !path.chars().any(char::is_control) {
+    if valid_absolute_windows_path(path) {
         Ok(())
     } else {
         Err(UiaError::InvalidGuestPath)
@@ -784,9 +784,13 @@ mod tests {
     }
 
     #[test]
-    fn validates_guest_file_paths_without_requiring_absolute_form() {
+    fn validates_absolute_guest_file_paths() {
         assert!(validate_guest_file_path(r"C:\Temp\file.txt").is_ok());
-        assert!(validate_guest_file_path(r"Temp\file.txt").is_ok());
+        assert!(validate_guest_file_path(r"\\host\share\file.txt").is_ok());
+        assert!(matches!(
+            validate_guest_file_path(r"Temp\file.txt"),
+            Err(UiaError::InvalidGuestPath)
+        ));
         assert!(matches!(
             validate_guest_file_path("bad\0path"),
             Err(UiaError::InvalidGuestPath)
