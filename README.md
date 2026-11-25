@@ -85,6 +85,14 @@ Guest media:
 
 winlane does not download or redistribute Windows. Evaluation media has its own Microsoft license terms.
 
+Before provisioning or starting a daemon, run the read-only host preflight:
+
+```sh
+cargo run --release -p winlane-cli -- doctor
+```
+
+`doctor` prints one JSON report with pass, warning, and hard-failure checks plus remediation text. It does not install packages or mutate the host. Warnings do not fail the command; missing hard requirements do. Use `--root PATH` to check free space for a non-default machine-root filesystem.
+
 ## Build
 
 ```sh
