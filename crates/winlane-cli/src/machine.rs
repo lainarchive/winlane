@@ -19,11 +19,78 @@ pub async fn run_machine_command(
     command: &MachineCommand,
     output: &mut impl Write,
 ) -> CliResult<()> {
-    let (control_socket, request) = machine_request(command)?;
+    let command = resolve_machine_command(command).await?;
+    let (control_socket, request) = machine_request(&command)?;
     let result = UnixControlClient::new(control_socket)
         .invoke(&request)
         .await?;
     write_json_line(output, &result)
+}
+
+async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineCommand> {
+    match command {
+        MachineCommand::Start(args) => Ok(MachineCommand::Start(resolve_machine_args(args).await?)),
+        MachineCommand::Stop(args) => Ok(MachineCommand::Stop(resolve_machine_args(args).await?)),
+        MachineCommand::Status(args) => {
+            Ok(MachineCommand::Status(resolve_machine_args(args).await?))
+        }
+        MachineCommand::Destroy(args) => {
+            Ok(MachineCommand::Destroy(resolve_machine_args(args).await?))
+        }
+        MachineCommand::Clone(args) => {
+            let machine =
+                resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
+                    .await?;
+            let mut args = args.clone();
+            args.machine_json = Some(serde_json::to_string(&machine)?);
+            args.machine_name = None;
+            Ok(MachineCommand::Clone(args))
+        }
+        MachineCommand::Create(_) | MachineCommand::List(_) => Ok(command.clone()),
+    }
+}
+
+async fn resolve_machine_args(args: &MachineArgs) -> CliResult<MachineArgs> {
+    let machine =
+        resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name).await?;
+    let mut args = args.clone();
+    args.machine_json = Some(serde_json::to_string(&machine)?);
+    args.machine_name = None;
+    Ok(args)
+}
+
+pub(crate) async fn resolve_machine(
+    control_socket: &std::path::Path,
+    machine_json: &Option<String>,
+    machine_name: &Option<String>,
+) -> CliResult<MachineHandle> {
+    if let Some(machine_json) = machine_json {
+        return Ok(serde_json::from_str(machine_json)?);
+    }
+    let Some(name) = machine_name else {
+        return Err(crate::CliError::Usage(
+            "one of --machine-json or --machine is required".to_string(),
+        ));
+    };
+    let result = UnixControlClient::new(control_socket)
+        .invoke(&ControlRequest::List)
+        .await?;
+    let machines: Vec<MachineHandle> = serde_json::from_value(result)?;
+    let matches = machines
+        .into_iter()
+        .filter(|machine| machine.name == *name)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(crate::CliError::Usage(format!(
+            "no machine named '{name}' is known to this daemon"
+        ))),
+        1 => Ok(matches.into_iter().next().ok_or_else(|| {
+            crate::CliError::Usage("machine resolution produced no result".to_string())
+        })?),
+        count => Err(crate::CliError::Usage(format!(
+            "{count} machines named '{name}' are known to this daemon"
+        ))),
+    }
 }
 
 pub async fn run_mcp(args: McpArgs) -> CliResult<()> {
@@ -38,6 +105,7 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
             spec.validate()?;
             Ok((args.control_socket.clone(), ControlRequest::Create { spec }))
         }
+        MachineCommand::List(args) => Ok((args.control_socket.clone(), ControlRequest::List)),
         MachineCommand::Start(args) => Ok((
             args.control_socket.clone(),
             ControlRequest::Start {
@@ -89,11 +157,17 @@ fn machine_spec(args: &CreateArgs) -> MachineSpec {
 }
 
 fn machine_handle(args: &MachineArgs) -> CliResult<MachineHandle> {
-    Ok(serde_json::from_str(&args.machine_json)?)
+    let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+        crate::CliError::Usage("machine JSON missing after resolution".to_string())
+    })?;
+    Ok(serde_json::from_str(machine_json)?)
 }
 
 fn clone_machine_handle(args: &CloneArgs) -> CliResult<MachineHandle> {
-    Ok(serde_json::from_str(&args.machine_json)?)
+    let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+        crate::CliError::Usage("machine JSON missing after resolution".to_string())
+    })?;
+    Ok(serde_json::from_str(machine_json)?)
 }
 
 fn clone_name(args: &CloneArgs) -> CliResult<String> {
@@ -143,14 +217,17 @@ mod tests {
     fn machine_args() -> MachineArgs {
         MachineArgs {
             control_socket: PathBuf::from("/tmp/control.sock"),
-            machine_json: serde_json::to_string(&MachineHandle {
-                id: "machine-1".to_string(),
-                name: "builder".to_string(),
-                state_dir: "/tmp/builder".to_string(),
-                backend: "qemu".to_string(),
-                state: MachineState::Stopped,
-            })
-            .unwrap(),
+            machine_json: Some(
+                serde_json::to_string(&MachineHandle {
+                    id: "machine-1".to_string(),
+                    name: "builder".to_string(),
+                    state_dir: "/tmp/builder".to_string(),
+                    backend: "qemu".to_string(),
+                    state: MachineState::Stopped,
+                })
+                .unwrap(),
+            ),
+            machine_name: None,
         }
     }
 
@@ -214,7 +291,7 @@ mod tests {
     #[test]
     fn invalid_machine_json_is_rejected_before_ipc() {
         let mut args = machine_args();
-        args.machine_json = "not json".to_string();
+        args.machine_json = Some("not json".to_string());
         assert!(machine_request(&MachineCommand::Status(args)).is_err());
     }
 
@@ -237,6 +314,7 @@ mod tests {
         let clone = super::CloneArgs {
             control_socket: machine.control_socket.clone(),
             machine_json: machine.machine_json.clone(),
+            machine_name: None,
             name: "copy-1".to_string(),
         };
         let (_socket, request) = machine_request(&MachineCommand::Clone(clone)).unwrap();
@@ -258,6 +336,7 @@ mod tests {
             let clone = super::CloneArgs {
                 control_socket: machine.control_socket.clone(),
                 machine_json: machine.machine_json.clone(),
+                machine_name: None,
                 name: name.to_string(),
             };
             assert!(machine_request(&MachineCommand::Clone(clone)).is_err());

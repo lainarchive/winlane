@@ -23,6 +23,7 @@ use winlane_view::{
     render_frame_with_fallback,
 };
 
+use crate::machine::resolve_machine;
 use crate::{CliResult, ViewArgs};
 
 const INPUT_POLL_QUANTUM: Duration = Duration::from_millis(10);
@@ -37,8 +38,9 @@ pub struct LiveViewConfig {
 }
 
 impl LiveViewConfig {
-    pub fn from_args(args: ViewArgs) -> CliResult<Self> {
-        let machine: MachineHandle = serde_json::from_str(&args.machine_json)?;
+    pub async fn from_args(args: ViewArgs) -> CliResult<Self> {
+        let machine =
+            resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name).await?;
         Ok(Self {
             control_socket: args.control_socket,
             machine,

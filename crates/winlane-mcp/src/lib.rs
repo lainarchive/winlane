@@ -5,8 +5,10 @@ pub mod server;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::Mutex;
 use winlane_contracts::{
     BootMode, CheckpointRef, ControlEvent, CpuArch, MachineHandle, MachineSpec, MouseButton,
     NetworkMode, ScrollDirection, UiNodeRef,
@@ -42,18 +44,21 @@ pub enum McpError {
 /// MCP-facing seam for serialized hardware-plane control plus direct guest semantic operations.
 pub struct McpControlPlane {
     client: UnixControlClient,
+    semantic_lock: Arc<Mutex<()>>,
 }
 
 impl McpControlPlane {
     pub fn new(control_socket: impl Into<std::path::PathBuf>) -> Self {
         Self {
             client: UnixControlClient::new(control_socket),
+            semantic_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn dispatch(&self, tool: &str, input: &Value) -> McpResult<Value> {
         match tool {
             "machine_create" => self.machine_create(input).await,
+            "machine_list" => self.machine_list().await,
             "machine_clone" => self.machine_clone(input).await,
             "machine_destroy" => self.machine_destroy(machine_input(input)?).await,
             "machine_status" => self.machine_status(machine_input(input)?).await,
@@ -112,6 +117,10 @@ impl McpControlPlane {
         spec.validate()
             .map_err(|error| McpError::InvalidInput(error.to_string()))?;
         Ok(self.client.invoke(&ControlRequest::Create { spec }).await?)
+    }
+
+    pub async fn machine_list(&self) -> McpResult<Value> {
+        Ok(self.client.invoke(&ControlRequest::List).await?)
     }
 
     pub async fn machine_clone(&self, input: &Value) -> McpResult<Value> {
@@ -333,6 +342,7 @@ impl McpControlPlane {
         machine: MachineHandle,
         operation: SemanticOperation,
     ) -> McpResult<Value> {
+        let _semantic_guard = self.semantic_lock.lock().await;
         tokio::task::spawn_blocking(move || {
             let qga_socket = PathBuf::from(machine.state_dir).join("qga.sock");
             let transport = UnixQgaTransport::connect(qga_socket, Duration::from_secs(5))
@@ -470,6 +480,10 @@ pub fn tool_definitions() -> Value {
                 "boot": {"type": "string", "enum": ["uefi", "bios"], "default": "uefi"}
             },
             "required": ["name"]
+        }},
+        {"name": "machine_list", "description": "List machines known to the control daemon as a JSON array", "inputSchema": {
+            "type": "object",
+            "properties": {}
         }},
         {"name": "machine_clone", "description": "Clone an existing machine under a new name", "inputSchema": {
             "type": "object",
@@ -747,6 +761,7 @@ mod tests {
             names,
             [
                 "machine_create",
+                "machine_list",
                 "machine_clone",
                 "machine_destroy",
                 "machine_status",

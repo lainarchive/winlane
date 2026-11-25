@@ -37,6 +37,7 @@ pub enum ControlRequest {
     Create {
         spec: MachineSpec,
     },
+    List,
     Start {
         machine: MachineHandle,
     },
@@ -214,6 +215,10 @@ async fn dispatch(request: ControlRequest, backend: Arc<Mutex<QemuBackend>>) -> 
     let result = match request {
         ControlRequest::Create { spec } => backend
             .create_machine(&spec)
+            .await
+            .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
+        ControlRequest::List => backend
+            .list_machines()
             .await
             .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
         ControlRequest::Start { machine } => backend
