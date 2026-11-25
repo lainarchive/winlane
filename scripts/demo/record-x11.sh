@@ -285,7 +285,7 @@ chmod +x "$view_launcher"
     --output-dir "$output_dir" \
     --work-dir "$work_dir" \
     --view-state "$view_state" \
-    --ready-file "$work_dir/recording-ready"
+    --ready-file "$work_dir/daemon-ready"
   printf ' 2>&1 | '
   quoted_command tee "$output_dir/driver.log"
   printf '\nexit "${PIPESTATUS[0]}"\n'
@@ -327,17 +327,6 @@ if [[ $window_ready -ne 1 ]]; then
   exit 1
 fi
 
-ffmpeg -hide_banner -loglevel warning -y \
-  -f x11grab -draw_mouse 0 -framerate 30 -video_size 1920x1080 -i "$display" \
-  -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart \
-  "$mp4_file" >"$output_dir/ffmpeg.log" 2>&1 &
-ffmpeg_pid=$!
-sleep 0.7
-if ! process_running "$ffmpeg_pid"; then
-  echo "record-x11.sh error: ffmpeg x11grab failed to start" >&2
-  sed -n '1,160p' "$output_dir/ffmpeg.log" >&2 || true
-  exit 1
-fi
 "$winlane_bin" daemon \
   --root "$runtime_root" \
   --control-socket "$control_socket" >"$output_dir/daemon.log" 2>&1 &
@@ -360,8 +349,38 @@ if [[ $daemon_ready -ne 1 ]]; then
   exit 1
 fi
 
-# Start the driver only after both recording and the control daemon are ready.
-printf 'daemon-ready\n' >"$work_dir/recording-ready"
+# Let the driver create/start the VM and prove interactive-desktop readiness first.
+printf 'daemon-ready\n' >"$work_dir/daemon-ready"
+
+ui_ready=0
+for _ in $(seq 1 600); do
+  if [[ -e $work_dir/ui-ready ]]; then
+    ui_ready=1
+    break
+  fi
+  if [[ -f $work_dir/driver-status ]]; then
+    echo "record-x11.sh error: demo driver exited before interactive-desktop readiness" >&2
+    exit 1
+  fi
+  sleep 0.5
+done
+if [[ $ui_ready -ne 1 ]]; then
+  echo "record-x11.sh error: timed out waiting for interactive-desktop readiness" >&2
+  exit 1
+fi
+
+ffmpeg -hide_banner -loglevel warning -y \
+  -f x11grab -draw_mouse 0 -framerate 30 -video_size 1920x1080 -i "$display" \
+  -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart \
+  "$mp4_file" >"$output_dir/ffmpeg.log" 2>&1 &
+ffmpeg_pid=$!
+sleep 0.7
+if ! process_running "$ffmpeg_pid"; then
+  echo "record-x11.sh error: ffmpeg x11grab failed to start" >&2
+  sed -n '1,160p' "$output_dir/ffmpeg.log" >&2 || true
+  exit 1
+fi
+printf 'recording-ready\n' >"$work_dir/recording-ready"
 
 driver_status=""
 while [[ ! -f $work_dir/driver-status ]]; do

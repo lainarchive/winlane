@@ -222,6 +222,47 @@ write_notepad_text() {
   done
 }
 
+
+dismiss_notepad_first_run_popup() {
+  local tree_file="$work_dir/ui-tree-popup.json"
+  local tree_args node_line node runtime_id invoke_args
+  tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ! mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_file"; then
+      sleep 2
+      continue
+    fi
+    printf '\n$ python3 %q %q\n' "$demo_dir/find_notepad_popup_button.py" "$tree_file" >&2
+    node_line=$(python3 "$demo_dir/find_notepad_popup_button.py" "$tree_file")
+    if [[ -z $node_line ]]; then
+      printf 'Notepad first-run popup absent or already dismissed\n'
+      return 0
+    fi
+    IFS=$'\t' read -r node runtime_id <<<"$node_line"
+    if ! valid_node_ref "$node" || ! valid_runtime_id "$runtime_id"; then
+      echo "drive-demo error: invalid popup node reference" >&2
+      return 1
+    fi
+    if [[ -n $runtime_id ]]; then
+      invoke_args=$(printf '{"machine":"%s","node":"%s","runtime_id":"%s","timeout_ms":30000}' "$machine_name" "$node" "$runtime_id")
+    else
+      invoke_args=$(printf '{"machine":"%s","node":"%s","timeout_ms":30000}' "$machine_name" "$node")
+    fi
+    if ! mcp_call --timeout-seconds 45 --arguments "$invoke_args" ui_invoke; then
+      echo 'drive-demo error: failed to invoke Notepad first-run dismissal button' >&2
+      return 1
+    fi
+    sleep 1
+    if mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_file" \
+      && [[ -z $(python3 "$demo_dir/find_notepad_popup_button.py" "$tree_file") ]]; then
+      printf 'Notepad first-run popup dismissed and verified absent\n'
+      return 0
+    fi
+  done
+  echo 'drive-demo error: Notepad first-run popup remained present after dismissal attempts' >&2
+  return 1
+}
+
 printf 'winlane real-machine demo\n'
 printf 'machine: %s\n' "$machine_name"
 printf 'control socket: %s\n' "$control_socket"
@@ -252,8 +293,14 @@ run "$winlane_bin" machine create \
 run "$winlane_bin" machine start \
   --control-socket "$control_socket" \
   --machine "$machine_name"
-start_view
 run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_name" 120
+run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 120 "$demo_dir"
+printf 'interactive desktop ready; enabling recording for demo actions\n'
+touch "$work_dir/ui-ready"
+while [[ ! -e $work_dir/recording-ready ]]; do
+  sleep 0.1
+done
+start_view
 
 run python3 "$demo_dir/write_task_xml.py" "$work_dir/notepad-task.xml" \
   --command 'C:\Windows\System32\notepad.exe'
@@ -279,6 +326,7 @@ run "$winlane_bin" guest run \
   --arg /TN --arg WinlaneDemoNotepad \
   --timeout-ms 10000
 run sleep 5
+dismiss_notepad_first_run_popup
 
 write_notepad_text 'before checkpoint' "$work_dir/ui-tree-before.json"
 run sleep 2
@@ -301,8 +349,9 @@ mcp_call --timeout-seconds 300 --checkpoint-file "$work_dir/checkpoint.json" che
 run "$winlane_bin" machine start \
   --control-socket "$control_socket" \
   --machine "$machine_name"
-start_view
 run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_name" 90
+run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 90 "$demo_dir"
+start_view
 
 tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
 mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$work_dir/ui-tree-restored.json"
