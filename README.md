@@ -155,7 +155,7 @@ cargo run --release -p winlane-cli -- machine checkpoint create \
   > /tmp/demo-1-checkpoint.json
 ```
 
-The current backend requires the machine to be stopped before restore. Restore prints the machine handle after the checkpoint is applied:
+The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
 
 ```sh
 cargo run --release -p winlane-cli -- machine stop \

@@ -50,6 +50,7 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
             Ok(MachineCommand::Clone(args))
         }
         MachineCommand::CheckpointCreate(args) => {
+            checkpoint_label(args)?;
             let machine =
                 resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
                     .await?;
