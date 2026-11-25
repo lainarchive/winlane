@@ -38,13 +38,17 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - a stopped Windows machine clone booted and exposed a ready guest agent
 - isolated networking produced no QEMU user NAT, `netdev`, or virtio-net device
 - pointer movement reached the Windows desktop and produced visible cursor/tooltip state
+- MCP initialization and tool discovery exposed lifecycle, hardware, semantic, process, and file tools
+- MCP machine create/start, UI tree read, process execution, file round trips, stop, checkpoint restore, and destroy passed against a live Windows machine
+- paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
+- MCP evidence sequences stayed contiguous, redacted sensitive process arguments, and content-addressed large output blobs
 
 Not yet proven end-to-end:
 
-- reliable visible keyboard, click, and typing activation; Ctrl-Esc worked once but was not reproducible in the fixed rerun
+- MCP `ui_invoke` and `ui_set_text`; both are implemented, but only direct guest invocation is live-proven
+- keyboard input beyond lowercase alphanumeric text; input is currently paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across a matrix of real terminal emulators
-- semantic MCP tools end-to-end against a live machine
 - long-running stability, concurrent machine use, and multi-machine cleanup
 
 Running checkpoints include RAM and can be several GiB. Clones are qcow2 overlays backed by the source disk; they receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
@@ -194,7 +198,7 @@ cargo run -p winlane-cli -- mcp \
 
 The hardware-plane MCP tools cover machine creation, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
 
-Semantic guest MCP tools are implemented for UI tree, invoke, set-text, process execution, and file transfer. They appear in `tools/list`, but the MCP path has not yet been validated against a live Windows guest; use the guest CLI for the validated path until that proof lands.
+Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers UI tree read, process execution, and file round trips; use the guest CLI for invoke and set-text until those MCP calls are proven end-to-end.
 
 Export or inspect evidence. Export writes `events.jsonl` plus the content-addressed `blobs/` directory:
 
