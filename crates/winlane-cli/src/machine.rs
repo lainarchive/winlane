@@ -9,7 +9,7 @@ use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 use crate::CliResult;
 use crate::args::{
     CheckpointCreateArgs, CheckpointListArgs, CheckpointRestoreArgs, CloneArgs, CreateArgs,
-    DaemonArgs, MachineArgs, MachineCommand, McpArgs,
+    DaemonArgs, MachineArgs, MachineCommand, McpArgs, WaitArgs,
 };
 
 pub async fn run_daemon(args: DaemonArgs) -> CliResult<()> {
@@ -22,12 +22,63 @@ pub async fn run_machine_command(
     command: &MachineCommand,
     output: &mut impl Write,
 ) -> CliResult<()> {
+    if let MachineCommand::Wait(args) = command {
+        return run_machine_wait(args, output).await;
+    }
     let command = resolve_machine_command(command).await?;
     let (control_socket, request) = machine_request(&command)?;
     let result = UnixControlClient::new(control_socket)
         .invoke(&request)
         .await?;
     write_json_line(output, &result)
+}
+
+async fn run_machine_wait(args: &WaitArgs, output: &mut impl Write) -> CliResult<()> {
+    let machine =
+        resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name).await?;
+    let client = UnixControlClient::new(args.control_socket.clone());
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(args.timeout_seconds);
+    loop {
+        let probe = client
+            .invoke(&ControlRequest::GuestAgentReady {
+                machine: machine.clone(),
+            })
+            .await?;
+        let state = probe
+            .get("state")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if probe.get("ready").and_then(serde_json::Value::as_bool) == Some(true) {
+            write_json_line(
+                output,
+                &serde_json::json!({
+                    "ready": true,
+                    "for": "guest-agent",
+                    "state": state,
+                    "elapsed_ms": elapsed_ms,
+                }),
+            )?;
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            write_json_line(
+                output,
+                &serde_json::json!({
+                    "ready": false,
+                    "for": "guest-agent",
+                    "state": state,
+                    "elapsed_ms": elapsed_ms,
+                    "error": "timeout",
+                }),
+            )?;
+            return Err(crate::CliError::Operation(
+                "timed out waiting for guest agent".to_string(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineCommand> {
@@ -37,6 +88,7 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
         MachineCommand::Status(args) => {
             Ok(MachineCommand::Status(resolve_machine_args(args).await?))
         }
+        MachineCommand::Wait(args) => Ok(MachineCommand::Wait(args.clone())),
         MachineCommand::Destroy(args) => {
             Ok(MachineCommand::Destroy(resolve_machine_args(args).await?))
         }
@@ -148,6 +200,17 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
                 machine: machine_handle(args)?,
             },
         )),
+        MachineCommand::Wait(args) => {
+            let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+                crate::CliError::Usage("machine JSON missing after resolution".to_string())
+            })?;
+            Ok((
+                args.control_socket.clone(),
+                ControlRequest::GuestAgentReady {
+                    machine: serde_json::from_str(machine_json)?,
+                },
+            ))
+        }
         MachineCommand::Clone(args) => Ok((
             args.control_socket.clone(),
             ControlRequest::CloneMachine {
@@ -366,6 +429,21 @@ mod tests {
             assert_eq!(encoded["machine"]["id"], "machine-1");
             assert_eq!(encoded["machine"]["state"], "stopped");
         }
+    }
+
+    #[test]
+    fn wait_request_uses_exact_ipc_operation() {
+        let args = machine_args();
+        let wait = WaitArgs {
+            control_socket: args.control_socket.clone(),
+            machine_json: args.machine_json.clone(),
+            machine_name: None,
+            timeout_seconds: 3,
+        };
+        let (_socket, request) = machine_request(&MachineCommand::Wait(wait)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "guest_agent_ready");
+        assert_eq!(encoded["machine"]["id"], "machine-1");
     }
 
     #[test]

@@ -331,3 +331,102 @@ async fn guest_machine_name_resolves_through_control_list_before_qga_connect() {
     drop(error);
     server.await.expect("server task");
 }
+
+async fn wait_server(
+    socket_path: std::path::PathBuf,
+    result: serde_json::Value,
+    expected: MachineHandle,
+) {
+    let listener = UnixListener::bind(socket_path).expect("bind control socket");
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            break;
+        };
+        let request = write_control_response(stream, result.clone()).await;
+        assert_eq!(
+            request,
+            ControlRequest::GuestAgentReady {
+                machine: expected.clone()
+            }
+        );
+        if result["ready"] == true {
+            break;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_wait_prints_ready_json_and_uses_exact_ipc_operation() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let expected = machine();
+    let server = tokio::spawn(wait_server(
+        socket_path.clone(),
+        serde_json::json!({"ready":true,"state":"running"}),
+        expected.clone(),
+    ));
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let args = winlane_cli::args::WaitArgs {
+        control_socket: socket_path,
+        machine_json: Some(serde_json::to_string(&expected).expect("encode machine")),
+        machine_name: None,
+        timeout_seconds: 1,
+    };
+    let mut output = Vec::new();
+    run_machine_command(&MachineCommand::Wait(args), &mut output)
+        .await
+        .expect("wait succeeds");
+    server.await.expect("server task");
+    let output_json: serde_json::Value = serde_json::from_slice(&output).expect("decode output");
+    assert_eq!(output_json["ready"], true);
+    assert_eq!(output_json["for"], "guest-agent");
+    assert_eq!(output_json["state"], "running");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_wait_timeout_prints_result_and_fails_nonzero_path() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let expected = machine();
+    let _server = tokio::spawn(async move {
+        let listener = UnixListener::bind(socket_path).expect("bind control socket");
+        for _ in 0..6 {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request = write_control_response(
+                stream,
+                serde_json::json!({"ready":false,"state":"stopped"}),
+            )
+            .await;
+            assert_eq!(
+                request,
+                ControlRequest::GuestAgentReady { machine: machine() }
+            );
+        }
+    });
+    for _ in 0..100 {
+        if root.path().join("control.sock").exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let args = winlane_cli::args::WaitArgs {
+        control_socket: root.path().join("control.sock"),
+        machine_json: Some(serde_json::to_string(&expected).expect("encode machine")),
+        machine_name: None,
+        timeout_seconds: 1,
+    };
+    let mut output = Vec::new();
+    let result = run_machine_command(&MachineCommand::Wait(args), &mut output).await;
+    assert!(matches!(result, Err(winlane_cli::CliError::Operation(_))));
+    let output_json: serde_json::Value = serde_json::from_slice(&output).expect("decode output");
+    assert_eq!(output_json["ready"], false);
+    assert_eq!(output_json["state"], "stopped");
+    assert_eq!(output_json["error"], "timeout");
+}

@@ -11,8 +11,10 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
+use winlane_contracts::MachineState;
 use winlane_contracts::{CheckpointRef, ControlEvent, MachineHandle, MachineSpec};
-use winlane_core::{CoreError, QemuBackend};
+use winlane_core::{CoreError, CoreResult, QemuBackend};
+use winlane_guest::qga::{QgaClient, UnixQgaTransport};
 
 const MAX_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -46,6 +48,9 @@ pub enum ControlRequest {
         machine: MachineHandle,
     },
     Status {
+        machine: MachineHandle,
+    },
+    GuestAgentReady {
         machine: MachineHandle,
     },
     CloneMachine {
@@ -235,10 +240,17 @@ async fn dispatch(
     backend: Arc<Mutex<QemuBackend>>,
     shutting_down: Arc<AtomicBool>,
 ) -> ControlResponse {
-    let mut backend = backend.lock().await;
     if shutting_down.load(Ordering::SeqCst) {
         return ControlResponse::failure("control daemon is shutting down");
     }
+    if let ControlRequest::GuestAgentReady { machine } = request {
+        let result = guest_agent_ready(backend, machine).await;
+        return match result {
+            Ok(value) => ControlResponse::success(value),
+            Err(error) => ControlResponse::failure(error.to_string()),
+        };
+    }
+    let mut backend = backend.lock().await;
     let result = match request {
         ControlRequest::Create { spec } => backend
             .create_machine(&spec)
@@ -260,6 +272,9 @@ async fn dispatch(
             .status_machine(&machine)
             .await
             .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
+        ControlRequest::GuestAgentReady { .. } => Err(CoreError::InvalidHandle(
+            "guest readiness dispatch invariant violated".to_string(),
+        )),
         ControlRequest::CloneMachine { machine, name } => backend
             .clone_machine(&machine, &name)
             .await
@@ -290,6 +305,51 @@ async fn dispatch(
         Ok(value) => ControlResponse::success(value),
         Err(error) => ControlResponse::failure(error.to_string()),
     }
+}
+
+async fn guest_agent_ready(
+    backend: Arc<Mutex<QemuBackend>>,
+    machine: MachineHandle,
+) -> CoreResult<serde_json::Value> {
+    let (state, path) = {
+        let mut backend = backend.lock().await;
+        let state = backend.status_machine(&machine).await?;
+        let path = backend.guest_agent_socket_path(&machine).await?;
+        (state, path)
+    };
+    let mut ready = false;
+    if matches!(state, MachineState::Running)
+        && let Some(path) = path
+    {
+        ready = probe_guest_agent(path).await;
+    }
+    serde_json::to_value(serde_json::json!({
+        "ready": ready,
+        "state": state,
+    }))
+    .map_err(CoreError::from)
+}
+
+async fn probe_guest_agent(path: std::path::PathBuf) -> bool {
+    let timeout = std::time::Duration::from_millis(250);
+    let stream = match tokio::time::timeout(timeout, tokio::net::UnixStream::connect(path)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) | Err(_) => return false,
+    };
+    tokio::task::spawn_blocking(move || {
+        let stream = stream.into_std()?;
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let transport = UnixQgaTransport::from_stream(stream)?;
+        let mut client = QgaClient::new(transport);
+        client
+            .ping()
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    })
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false)
 }
 
 async fn read_bounded_line(
@@ -336,7 +396,7 @@ mod tests {
         let backend = Arc::new(Mutex::new(backend));
         let shutting_down = Arc::new(AtomicBool::new(true));
         let response = dispatch(
-            ControlRequest::Status {
+            ControlRequest::GuestAgentReady {
                 machine: MachineHandle {
                     id: "machine".to_string(),
                     name: "machine".to_string(),
@@ -354,5 +414,54 @@ mod tests {
             response.error.as_deref(),
             Some("control daemon is shutting down")
         );
+    }
+    #[tokio::test]
+    async fn qga_probe_missing_socket_is_false() {
+        let root = tempfile::tempdir().expect("temporary root");
+        assert!(!probe_guest_agent(root.path().join("missing.sock")).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qga_probe_accepts_live_agent_response() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("qga.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind qga socket");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.expect("read request");
+                request.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).expect("decode ping request");
+            assert_eq!(request["execute"], "guest-ping");
+            stream
+                .write_all(br#"{"return":{}}"#)
+                .await
+                .expect("write response");
+            stream.write_all(b"\r\n").await.expect("write newline");
+        });
+        assert!(probe_guest_agent(path).await);
+        server.await.expect("server task");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn qga_probe_unresponsive_socket_is_bounded_false() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let path = root.path().join("qga.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind qga socket");
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+        let started = std::time::Instant::now();
+        assert!(!probe_guest_agent(path).await);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        server.abort();
     }
 }

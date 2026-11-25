@@ -200,6 +200,16 @@ kitty, Ghostty, and WezTerm receive PNG frames that winlane scales host-side wit
 
 Outside Kitty-protocol terminals winlane uses half-blocks only as a preview fallback and reserves a terminal row labeled `HALF-BLOCK PREVIEW` when there is enough space. Kitty passthrough inside tmux is not enabled: released tmux (through 3.8) does not reliably manage Kitty placements per pane, and the pane-aware implementation exists only in unreleased tmux master/next-3.9 work. Manual APC passthrough cannot provide reliable pane clipping or redraw semantics, so tmux deliberately keeps the preview fallback.
 
+Wait for the guest agent with a bounded timeout. The result is compact JSON; timeout prints `ready:false` and exits nonzero:
+
+```sh
+cargo run --release -p winlane-cli -- machine wait \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1 \
+  --for guest-agent \
+  --timeout-seconds 120
+```
+
 ## Use the semantic guest plane
 
 Run a process:

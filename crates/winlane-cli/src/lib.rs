@@ -25,6 +25,8 @@ pub type CliResult<T> = Result<T, CliError>;
 pub enum CliError {
     #[error("{0}")]
     Usage(String),
+    #[error("{0}")]
+    Operation(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

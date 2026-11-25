@@ -61,6 +61,11 @@ impl UnixQgaTransport {
         let reader = BufReader::new(writer.try_clone()?);
         Ok(Self { reader, writer })
     }
+
+    pub fn from_stream(writer: UnixStream) -> io::Result<Self> {
+        let reader = BufReader::new(writer.try_clone()?);
+        Ok(Self { reader, writer })
+    }
 }
 
 impl QgaTransport for UnixQgaTransport {

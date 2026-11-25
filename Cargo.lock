@@ -922,6 +922,7 @@ dependencies = [
  "tokio",
  "winlane-contracts",
  "winlane-core",
+ "winlane-guest",
 ]
 
 [[package]]
