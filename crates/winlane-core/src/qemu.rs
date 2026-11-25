@@ -381,7 +381,7 @@ impl QemuBackend {
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => {
                     let _ = qmp.execute("quit", None).await;
-                    if !wait_for_external_qmp_exit(&record.qmp_socket_path).await? {
+                    if !wait_for_external_qmp_exit(&record.qmp_socket_path, record.pid).await? {
                         return Err(CoreError::Qemu(format!(
                             "qemu process for machine '{}' did not exit after qmp quit",
                             record.handle.name
@@ -456,7 +456,15 @@ impl QemuBackend {
         {
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => query_machine_state(&qmp).await?,
-                Err(_) => record.handle.state.clone(),
+                Err(_) => {
+                    if let Some(pid) = record.pid
+                        && qemu_process_alive(pid, &record.qmp_socket_path).await
+                    {
+                        MachineState::Running
+                    } else {
+                        record.handle.state.clone()
+                    }
+                }
             }
         } else {
             record.handle.state.clone()
@@ -1389,6 +1397,29 @@ async fn shutdown_swtpm(child: &mut Option<Child>) {
     }
 }
 
+async fn qemu_process_alive(pid: u32, qmp_socket_path: &Path) -> bool {
+    let stat_path = format!("/proc/{pid}/stat");
+    let Ok(stat) = tokio::fs::read_to_string(&stat_path).await else {
+        return false;
+    };
+    if stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.trim_start().chars().next())
+        == Some('Z')
+    {
+        return false;
+    }
+    let cmdline_path = format!("/proc/{pid}/cmdline");
+    let Ok(cmdline) = tokio::fs::read(&cmdline_path).await else {
+        return false;
+    };
+    if cmdline.is_empty() {
+        return false;
+    }
+    let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+    cmdline.contains(&qmp_socket_path.to_string_lossy().into_owned())
+}
+
 async fn external_qmp_is_gone(path: &Path) -> CoreResult<bool> {
     if !tokio::fs::try_exists(path)
         .await
@@ -1404,14 +1435,26 @@ async fn external_qmp_is_gone(path: &Path) -> CoreResult<bool> {
     )
 }
 
-async fn wait_for_external_qmp_exit(path: &Path) -> CoreResult<bool> {
+async fn external_machine_is_gone(path: &Path, pid: Option<u32>) -> CoreResult<bool> {
+    if !external_qmp_is_gone(path).await? {
+        return Ok(false);
+    }
+    if let Some(pid) = pid
+        && qemu_process_alive(pid, path).await
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+async fn wait_for_external_qmp_exit(path: &Path, pid: Option<u32>) -> CoreResult<bool> {
     for _ in 0..50 {
-        if external_qmp_is_gone(path).await? {
+        if external_machine_is_gone(path, pid).await? {
             return Ok(true);
         }
         sleep(Duration::from_millis(100)).await;
     }
-    external_qmp_is_gone(path).await
+    external_machine_is_gone(path, pid).await
 }
 
 async fn wait_for_child(child: &mut Child, duration: Duration) -> CoreResult<bool> {
