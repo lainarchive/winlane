@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
 use winlane_contracts::{
-    CheckpointRef, ControlEvent, MachineHandle, MouseButton, ScrollDirection, UiNodeRef,
+    BootMode, CheckpointRef, ControlEvent, CpuArch, MachineHandle, MachineSpec, MouseButton,
+    NetworkMode, ScrollDirection, UiNodeRef,
 };
 use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
 use winlane_guest::uia::{BlockingUiaControl, UiaResult};
@@ -52,6 +53,9 @@ impl McpControlPlane {
 
     pub async fn dispatch(&self, tool: &str, input: &Value) -> McpResult<Value> {
         match tool {
+            "machine_create" => self.machine_create(input).await,
+            "machine_clone" => self.machine_clone(input).await,
+            "machine_destroy" => self.machine_destroy(machine_input(input)?).await,
             "machine_status" => self.machine_status(machine_input(input)?).await,
             "machine_start" => self.machine_start(machine_input(input)?).await,
             "machine_stop" => self.machine_stop(machine_input(input)?).await,
@@ -71,6 +75,60 @@ impl McpControlPlane {
             "file_export" => self.file_export(input).await,
             other => Err(McpError::UnknownTool(other.to_string())),
         }
+    }
+
+    pub async fn machine_create(&self, input: &Value) -> McpResult<Value> {
+        let network = match optional_string(input, "network")?.as_deref() {
+            None | Some("isolated") => NetworkMode::Isolated,
+            Some("nat") => NetworkMode::Nat,
+            Some(_) => {
+                return Err(McpError::InvalidInput(
+                    "network must be isolated or nat".to_string(),
+                ));
+            }
+        };
+        let boot = match optional_string(input, "boot")?.as_deref() {
+            None | Some("uefi") => BootMode::Uefi,
+            Some("bios") => BootMode::Bios,
+            Some(_) => {
+                return Err(McpError::InvalidInput(
+                    "boot must be uefi or bios".to_string(),
+                ));
+            }
+        };
+        let spec = MachineSpec {
+            name: required_string(input, "name")?,
+            arch: CpuArch::X86_64,
+            memory_mb: optional_bounded_u64(input, "memory_mb", 4096, 512, 1_048_576)? as u32,
+            cpus: optional_bounded_u64(input, "cpus", 4, 1, 256)? as u16,
+            disk_gb: optional_bounded_u64(input, "disk_gb", 64, 16, 4096)? as u32,
+            iso_path: optional_string(input, "iso_path")?,
+            base_image_path: optional_string(input, "base_image_path")?,
+            guest_agent: optional_bool(input, "guest_agent")?.unwrap_or(true),
+            network,
+            tpm: optional_bool(input, "tpm")?.unwrap_or(true),
+            boot,
+        };
+        spec.validate()
+            .map_err(|error| McpError::InvalidInput(error.to_string()))?;
+        Ok(self.client.invoke(&ControlRequest::Create { spec }).await?)
+    }
+
+    pub async fn machine_clone(&self, input: &Value) -> McpResult<Value> {
+        Ok(self
+            .client
+            .invoke(&ControlRequest::CloneMachine {
+                machine: machine_input(input)?,
+                name: required_string(input, "name")?,
+            })
+            .await?)
+    }
+
+    pub async fn machine_destroy(&self, machine: MachineHandle) -> McpResult<Value> {
+        Ok(self
+            .client
+            .invoke(&ControlRequest::Destroy { machine })
+            .await?)
     }
 
     pub async fn machine_status(&self, machine: MachineHandle) -> McpResult<Value> {
@@ -397,6 +455,31 @@ pub fn tool_definitions() -> Value {
         "required": ["machine", "x", "y"]
     });
     json!([
+        {"name": "machine_create", "description": "Create a disposable machine from a golden image or installer ISO", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 48},
+                "base_image_path": {"type": "string"},
+                "iso_path": {"type": "string"},
+                "memory_mb": {"type": "integer", "minimum": 512, "maximum": 1048576, "default": 4096},
+                "cpus": {"type": "integer", "minimum": 1, "maximum": 256, "default": 4},
+                "disk_gb": {"type": "integer", "minimum": 16, "maximum": 4096, "default": 64},
+                "network": {"type": "string", "enum": ["isolated", "nat"], "default": "isolated"},
+                "guest_agent": {"type": "boolean", "default": true},
+                "tpm": {"type": "boolean", "default": true},
+                "boot": {"type": "string", "enum": ["uefi", "bios"], "default": "uefi"}
+            },
+            "required": ["name"]
+        }},
+        {"name": "machine_clone", "description": "Clone an existing machine under a new name", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "name": {"type": "string", "minLength": 1, "maxLength": 48}
+            },
+            "required": ["machine", "name"]
+        }},
+        {"name": "machine_destroy", "description": "Destroy a machine and its disposable state", "inputSchema": machine_only},
         {"name": "machine_status", "description": "Read machine state", "inputSchema": machine_only},
         {"name": "machine_start", "description": "Start an existing machine", "inputSchema": machine_only},
         {"name": "machine_stop", "description": "Stop a running machine", "inputSchema": machine_only},
@@ -562,6 +645,16 @@ fn optional_bounded_u64(
     }
 }
 
+fn optional_bool(input: &Value, field: &str) -> McpResult<Option<bool>> {
+    match input.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| McpError::InvalidInput(format!("field '{field}' must be a boolean"))),
+    }
+}
+
 fn required_u32(input: &Value, field: &str) -> McpResult<u32> {
     let value = input.get(field).and_then(Value::as_u64).ok_or_else(|| {
         McpError::InvalidInput(format!("missing required integer field '{field}'"))
@@ -653,6 +746,9 @@ mod tests {
         assert_eq!(
             names,
             [
+                "machine_create",
+                "machine_clone",
+                "machine_destroy",
                 "machine_status",
                 "machine_start",
                 "machine_stop",
@@ -698,6 +794,22 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(json!(actual), expected);
+    }
+
+    #[tokio::test]
+    async fn machine_create_input_is_validated_before_control_connect() {
+        let mcp = McpControlPlane::new("/tmp/winlane-test.sock");
+        let bad_name = mcp
+            .dispatch("machine_create", &json!({"name": "bad/name"}))
+            .await;
+        assert!(matches!(bad_name, Err(McpError::InvalidInput(_))));
+        let bad_network = mcp
+            .dispatch(
+                "machine_create",
+                &json!({"name": "valid-name", "network": "bridged"}),
+            )
+            .await;
+        assert!(matches!(bad_network, Err(McpError::InvalidInput(_))));
     }
 
     #[tokio::test]

@@ -175,6 +175,9 @@ async fn record_tool_evidence(
 
 fn evidence_kind_for_tool(tool: &str) -> &'static str {
     match tool {
+        "machine_create" => "machine_created",
+        "machine_clone" => "machine_cloned",
+        "machine_destroy" => "machine_destroyed",
         "machine_start" => "machine_started",
         "machine_stop" => "machine_stopped",
         "screenshot" => "frame_captured",

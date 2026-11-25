@@ -4,6 +4,9 @@ The first tool set is intentionally close to machine control, not a high-level t
 
 | Tool | Purpose |
 |---|---|
+| `machine_create` | Create a disposable machine from a golden image or installer ISO |
+| `machine_clone` | Clone an existing machine under a new name |
+| `machine_destroy` | Destroy a machine and its disposable state |
 | `machine_status` | Read machine state and boot readiness |
 | `machine_start` | Start an existing machine |
 | `machine_stop` | Ask the guest or hypervisor to stop cleanly |
@@ -16,7 +19,8 @@ The first tool set is intentionally close to machine control, not a high-level t
 | `checkpoint_create` | Create a restorable machine checkpoint |
 | `checkpoint_restore` | Restore a checkpoint |
 | `ui_tree` | Read the guest UI Automation tree when the helper is available |
-| `ui_invoke` | Invoke a stable UI element reference |
+| `ui_invoke` | Invoke a snapshot-scoped UI element path |
+| `ui_set_text` | Set text through UI Automation when the target supports ValuePattern |
 | `process_run` | Run a guest process and capture exit status |
 | `file_import` | Copy a host file into the guest inbox |
 | `file_export` | Copy a guest file to the host outbox |
