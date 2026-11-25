@@ -1,6 +1,7 @@
 //! In-guest helper protocol, validation, and framed message encoding.
 
 pub mod qga;
+pub mod transfer;
 pub mod uia;
 
 use serde::{Deserialize, Serialize};

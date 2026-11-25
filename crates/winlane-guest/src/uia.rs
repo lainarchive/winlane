@@ -239,6 +239,20 @@ pub enum UiaError {
     InvalidTimeout,
     #[error("file transfer is {actual} bytes; maximum is {maximum}")]
     TransferTooLarge { actual: u64, maximum: u64 },
+    #[error("workspace member count exceeds {maximum}")]
+    TooManyMembers { maximum: u64 },
+    #[error("workspace member is {actual} bytes; maximum is {maximum}")]
+    MemberTooLarge { actual: u64, maximum: u64 },
+    #[error("archive entry is unsafe or unsupported: {0}")]
+    UnsafeArchiveEntry(String),
+    #[error("archive is malformed: {0}")]
+    MalformedArchive(String),
+    #[error("destination exists; pass overwrite to replace it")]
+    DestinationExists,
+    #[error("host operation failed: {0}")]
+    HostCommand(String),
+    #[error("guest file hash or size mismatch after transfer")]
+    TransferVerificationFailed,
 }
 
 pub type UiaResult<T> = Result<T, UiaError>;
@@ -302,68 +316,6 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         self.generation += 1;
         value["generation"] = Value::from(self.generation);
         Ok(value)
-    }
-
-    pub fn import_file_blocking(
-        &mut self,
-        host_path: &std::path::Path,
-        guest_path: &str,
-    ) -> UiaResult<FileTransferRef> {
-        validate_guest_file_path(guest_path)?;
-        let metadata = std::fs::metadata(host_path).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        if metadata.len() > crate::MAX_TRANSFER_BYTES {
-            return Err(UiaError::TransferTooLarge {
-                actual: metadata.len(),
-                maximum: crate::MAX_TRANSFER_BYTES,
-            });
-        }
-        let bytes = std::fs::read(host_path).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        if bytes.len() as u64 > crate::MAX_TRANSFER_BYTES {
-            return Err(UiaError::TransferTooLarge {
-                actual: bytes.len() as u64,
-                maximum: crate::MAX_TRANSFER_BYTES,
-            });
-        }
-        self.client.write_guest_file(guest_path, &bytes)?;
-        Ok(FileTransferRef {
-            sha256: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            host_path: host_path.to_string_lossy().into_owned(),
-            guest_path: guest_path.to_owned(),
-        })
-    }
-
-    pub fn export_file_blocking(
-        &mut self,
-        guest_path: &str,
-        host_path: &std::path::Path,
-    ) -> UiaResult<FileTransferRef> {
-        validate_guest_file_path(guest_path)?;
-        let bytes = self
-            .client
-            .read_guest_file(guest_path, crate::MAX_TRANSFER_BYTES)?;
-        if let Some(parent) = host_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| UiaError::HostIo {
-                path: parent.to_string_lossy().into_owned(),
-                source: error,
-            })?;
-        }
-        std::fs::write(host_path, &bytes).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        Ok(FileTransferRef {
-            sha256: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            host_path: host_path.to_string_lossy().into_owned(),
-            guest_path: guest_path.to_owned(),
-        })
     }
 
     pub fn invoke(
@@ -663,7 +615,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn process_output_summary(capture: &ProcessCapture) -> String {
+pub(crate) fn process_output_summary(capture: &ProcessCapture) -> String {
     let stdout = String::from_utf8_lossy(&capture.stdout);
     let stderr = String::from_utf8_lossy(&capture.stderr);
     format!(
@@ -706,6 +658,7 @@ fn validate_absolute_windows_command(command: &str) -> UiaResult<()> {
     }
 }
 
+#[cfg(test)]
 fn validate_guest_file_path(path: &str) -> UiaResult<()> {
     if valid_absolute_windows_path(path) {
         Ok(())
@@ -714,7 +667,7 @@ fn validate_guest_file_path(path: &str) -> UiaResult<()> {
     }
 }
 
-fn valid_absolute_windows_path(path: &str) -> bool {
+pub(crate) fn valid_absolute_windows_path(path: &str) -> bool {
     if path.is_empty() || path.len() > 32_767 || path.chars().any(char::is_control) {
         return false;
     }

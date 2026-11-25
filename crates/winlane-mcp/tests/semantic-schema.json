@@ -321,7 +321,7 @@
   },
   {
     "name": "file_import",
-    "description": "Copy a host file into the guest",
+    "description": "Copy a host file or workspace directory into the guest",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -376,6 +376,14 @@
         },
         "guest_path": {
           "type": "string"
+        },
+        "workspace": {
+          "type": "boolean",
+          "default": false
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -387,7 +395,7 @@
   },
   {
     "name": "file_export",
-    "description": "Copy a guest file to the host",
+    "description": "Copy a guest file or workspace directory to the host",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -442,6 +450,14 @@
         },
         "host_path": {
           "type": "string"
+        },
+        "workspace": {
+          "type": "boolean",
+          "default": false
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
