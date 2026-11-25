@@ -255,9 +255,22 @@ pub fn provision(options: &ProvisionOptions) -> ProvisionResult<ProvisionReport>
     report.readiness = outcome.readiness;
     report.shutdown = outcome.shutdown;
     report.final_screenshot_path = outcome.final_screenshot_path;
+    let cleanup_result = cleanup_sensitive_answer_media(&paths);
 
     if let Some(error) = outcome.error {
+        let error = match cleanup_result {
+            Ok(()) => error,
+            Err(cleanup_error) => format!("{error}; answer media cleanup failed: {cleanup_error}"),
+        };
         return finish_failed(report, started, ProvisionStage::Failed, error);
+    }
+    if let Err(error) = cleanup_result {
+        return finish_failed(
+            report,
+            started,
+            ProvisionStage::Failed,
+            format!("answer media cleanup failed: {error}"),
+        );
     }
 
     report.success = true;
@@ -445,6 +458,21 @@ fn file_probe(name: &str, path: &Path, minimum_bytes: u64) -> ProbeResult {
 }
 
 fn prepare_answer_media(options: &ProvisionOptions, paths: &PipelinePaths) -> ProvisionResult<()> {
+    let result = write_answer_media(options, paths);
+    if result.is_ok() {
+        return Ok(());
+    }
+    let cleanup_result = cleanup_sensitive_answer_media(paths);
+    match (result, cleanup_result) {
+        (Ok(()), _) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(ProvisionError::InvalidRequest(format!(
+            "{error}; answer media cleanup failed: {cleanup_error}"
+        ))),
+    }
+}
+
+fn write_answer_media(options: &ProvisionOptions, paths: &PipelinePaths) -> ProvisionResult<()> {
     let password = random_password()?;
     let username = "winlane";
     let computer_name = computer_name(&options.spec.name);
@@ -456,37 +484,90 @@ fn prepare_answer_media(options: &ProvisionOptions, paths: &PipelinePaths) -> Pr
         options.image_name.as_deref(),
         &options.product_key,
     );
+    set_private_dir(&paths.unattend_dir)?;
     fs::write(paths.unattend_dir.join("autounattend.xml"), xml)?;
+    set_private_file(&paths.unattend_dir.join("autounattend.xml"))?;
     fs::write(
         paths.unattend_dir.join("winlane-firstboot.cmd"),
         firstboot_cmd(),
     )?;
 
-    let output = if command_available("xorriso") {
-        Command::new("xorriso")
-            .args([
-                "-as",
-                "mkisofs",
-                "-quiet",
-                "-J",
-                "-r",
-                "-V",
-                "WINLANE_UNATTEND",
-                "-o",
-            ])
-            .arg(&paths.unattended_iso)
-            .arg(&paths.unattend_dir)
-            .output()?
-    } else {
-        Command::new("genisoimage")
-            .args(["-quiet", "-J", "-r", "-V", "WINLANE_UNATTEND", "-o"])
-            .arg(&paths.unattended_iso)
-            .arg(&paths.unattend_dir)
-            .output()?
-    };
-    if !output.status.success() {
-        return Err(command_error("iso builder", output.status, &output.stderr));
+    let build_result = (|| {
+        let output = if command_available("xorriso") {
+            Command::new("xorriso")
+                .args([
+                    "-as",
+                    "mkisofs",
+                    "-quiet",
+                    "-J",
+                    "-r",
+                    "-V",
+                    "WINLANE_UNATTEND",
+                    "-o",
+                ])
+                .arg(&paths.unattended_iso)
+                .arg(&paths.unattend_dir)
+                .output()?
+        } else {
+            Command::new("genisoimage")
+                .args(["-quiet", "-J", "-r", "-V", "WINLANE_UNATTEND", "-o"])
+                .arg(&paths.unattended_iso)
+                .arg(&paths.unattend_dir)
+                .output()?
+        };
+        if !output.status.success() {
+            return Err(command_error("iso builder", output.status, &output.stderr));
+        }
+        set_private_file(&paths.unattended_iso)
+    })();
+    let cleanup_result = fs::remove_dir_all(&paths.unattend_dir);
+    match (build_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error.into()),
     }
+}
+
+fn cleanup_sensitive_answer_media(paths: &PipelinePaths) -> ProvisionResult<()> {
+    let mut errors = Vec::new();
+    for (path, directory) in [(&paths.unattend_dir, true), (&paths.unattended_iso, false)] {
+        let result = if directory {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            errors.push(format!("{}: {error}", path.display()));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ProvisionError::InvalidRequest(errors.join("; ")))
+    }
+}
+
+fn set_private_dir(path: &Path) -> ProvisionResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn set_private_file(path: &Path) -> ProvisionResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -1159,5 +1240,47 @@ mod tests {
         let name = computer_name("averyveryverylong_machine_name");
         assert!(name.len() <= 15);
         assert!(!name.contains('_'));
+    }
+
+    #[test]
+    fn answer_media_cleanup_removes_source_and_iso_and_ignores_missing() {
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let options = ProvisionOptions::new(
+            spec(),
+            PathBuf::from("/tmp/virtio.iso"),
+            root.path().to_path_buf(),
+        );
+        let paths = pipeline_paths(&options);
+        fs::create_dir_all(&paths.state_dir).expect("create state dir");
+        fs::create_dir_all(&paths.unattend_dir).expect("create answer dir");
+        fs::write(paths.unattend_dir.join("autounattend.xml"), b"password")
+            .expect("write answer xml");
+        fs::write(&paths.unattended_iso, b"iso").expect("write answer iso");
+        cleanup_sensitive_answer_media(&paths).expect("cleanup answer media");
+        assert!(!paths.unattend_dir.exists());
+        assert!(!paths.unattended_iso.exists());
+        cleanup_sensitive_answer_media(&paths).expect("missing answer media is clean");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sensitive_answer_media_permissions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let file = root.path().join("unattended.iso");
+        let directory = root.path().join("unattend");
+        fs::write(&file, b"iso").expect("write iso");
+        fs::create_dir(&directory).expect("create unattend dir");
+        set_private_file(&file).expect("private file");
+        set_private_dir(&directory).expect("private dir");
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }
