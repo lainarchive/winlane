@@ -382,6 +382,26 @@ impl QemuBackend {
         Ok(())
     }
 
+    pub async fn shutdown_machines(&mut self) -> CoreResult<()> {
+        let machines = self.list_machines().await?;
+        let mut first_error = None;
+        for handle in machines {
+            if !matches!(handle.state, MachineState::Running | MachineState::Paused) {
+                continue;
+            }
+            if let Err(error) = self.stop_machine(&handle).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
     pub async fn status_machine(&mut self, machine: &MachineHandle) -> CoreResult<MachineState> {
         let mut record = self.load_record(machine).await?;
         let machine_id = record.handle.id.clone();
@@ -1052,6 +1072,7 @@ impl QemuBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(CoreError::io("spawn swtpm", self.swtpm_binary.clone()))?;
         for _ in 0..50 {

@@ -209,9 +209,16 @@ async fn multiple_fake_machines_run_and_clean_up_independently() {
         MachineState::Running
     );
     backend
-        .stop_machine(&second)
+        .shutdown_machines()
         .await
-        .expect("stop second machine");
+        .expect("shutdown remaining machines");
+    assert_eq!(
+        backend
+            .status_machine(&second)
+            .await
+            .expect("second stopped status"),
+        MachineState::Stopped
+    );
     backend
         .destroy_machine(&first)
         .await
