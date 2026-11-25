@@ -118,7 +118,11 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
         .clone_machine(&restored, "controlclone")
         .await
         .expect("clone machine");
-    assert!(root.path().join("controlclone/disk.qcow2").exists());
+    let clone_disk_path = root.path().join("controlclone/disk.qcow2");
+    assert!(clone_disk_path.exists());
+    let clone_disk = std::fs::read_to_string(&clone_disk_path).expect("read clone disk metadata");
+    assert!(clone_disk.contains("converted_from"));
+    assert!(clone_disk.contains("\"backing\": null"));
 
     let command_log = root.path().join("controltest/qmp.sock.commands");
     let commands = std::fs::read_to_string(command_log).expect("QMP command log");
@@ -420,6 +424,17 @@ async fn real_qemu_machine_control_proof() {
         .clone_machine(&machine, "realclone")
         .await
         .expect("real clone");
+    let clone_info = std::process::Command::new("qemu-img")
+        .arg("info")
+        .arg(PathBuf::from(&clone.state_dir).join("disk.qcow2"))
+        .output()
+        .expect("inspect real clone");
+    assert!(
+        clone_info.status.success(),
+        "qemu-img clone info failed: {}",
+        String::from_utf8_lossy(&clone_info.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&clone_info.stdout).contains("backing file:"));
     backend
         .destroy_machine(&clone)
         .await
