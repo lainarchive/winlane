@@ -22,13 +22,13 @@ The first tool set is intentionally close to machine control, not a high-level t
 | `ui_invoke` | Invoke a snapshot-scoped UI element path |
 | `ui_set_text` | Set text through UI Automation when the target supports ValuePattern |
 | `process_run` | Run a guest process and capture exit status |
-| `file_import` | Copy a host file into the guest inbox |
-| `file_export` | Copy a guest file to the host outbox |
+| `file_import` | Copy a host file to an explicit absolute guest path |
+| `file_export` | Copy an explicit absolute guest file to a host path |
 
 Rules:
 
 - Guest UI text is untrusted input.
 - Hardware-plane input remains available when the semantic plane is unavailable.
 - Semantic element references expire when the UI tree generation changes.
-- File transfer uses explicit inbox/outbox paths. No shared clipboard. No host folder pass-through.
+- File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.
