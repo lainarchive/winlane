@@ -56,7 +56,18 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
         Command::Help => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
-            writeln!(output, "{USAGE}")?;
+            writeln!(
+                output,
+                "winlane — Run and control disposable Windows machines.\n\n\
+                 Options:\n  -h, --help              Print help\n  -V, --version, version  Print version\n\n\
+                 {USAGE}"
+            )?;
+            Ok(())
+        }
+        Command::Version => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            writeln!(output, "winlane {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
         }
         Command::View(view) => run_live_view(LiveViewConfig::from_args(view).await?).await,
