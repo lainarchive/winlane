@@ -165,9 +165,19 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
                 crop,
                 session.viewport.full_repaint_required(),
             ) {
-                let visible_frame = captured.frame.crop(crop)?;
+                let cropped_frame;
+                let visible_frame = if crop.x == 0
+                    && crop.y == 0
+                    && crop.width == captured.frame.width()
+                    && crop.height == captured.frame.height()
+                {
+                    &captured.frame
+                } else {
+                    cropped_frame = captured.frame.crop(crop)?;
+                    &cropped_frame
+                };
                 let output = render_frame_with_fallback(
-                    &visible_frame,
+                    visible_frame,
                     session.viewport.geometry(),
                     protocol,
                 )?;

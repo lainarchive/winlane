@@ -1,3 +1,5 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
 use crate::detect::GraphicsProtocol;
 use crate::error::ViewResult;
 use crate::frame::Frame;
@@ -9,8 +11,12 @@ const CHUNK_SIZE: usize = 4096;
 
 pub fn render_kitty(frame: &Frame, geometry: TerminalGeometry) -> ViewResult<RenderedOutput> {
     let plan = plan_frame(frame, geometry, OutputSurface::KittyPixels)?;
-    let scaled = frame.scaled_catmull_rom(plan.frame_width, plan.frame_height)?;
-    let png = encode_png_rgb(&scaled)?;
+    let png = if plan.frame_width == frame.width() && plan.frame_height == frame.height() {
+        encode_png_rgb(frame)?
+    } else {
+        let rgb = frame.scaled_catmull_rom_rgb_bytes(plan.frame_width, plan.frame_height)?;
+        encode_png_rgb_bytes(&rgb, plan.frame_width, plan.frame_height)?
+    };
     let placement = KittyPlacement::new(plan, geometry);
     let mut output = String::new();
     output.push_str("\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
@@ -50,14 +56,18 @@ impl KittyPlacement {
 }
 
 pub fn encode_png_rgb(frame: &Frame) -> ViewResult<Vec<u8>> {
+    encode_png_rgb_bytes(&frame.rgb_bytes(), frame.width(), frame.height())
+}
+
+fn encode_png_rgb_bytes(rgb: &[u8], width: u32, height: u32) -> ViewResult<Vec<u8>> {
     let mut encoded = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut encoded, frame.width(), frame.height());
+        let mut encoder = png::Encoder::new(&mut encoded, width, height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(&frame.rgb_bytes())?;
+        writer.write_image_data(rgb)?;
     }
     Ok(encoded)
 }
@@ -94,27 +104,7 @@ fn encode_kitty_payload(payload: &[u8], metadata: &str) -> String {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = u32::from(chunk[0]);
-        let second = u32::from(*chunk.get(1).unwrap_or(&0));
-        let third = u32::from(*chunk.get(2).unwrap_or(&0));
-        let value = (first << 16) | (second << 8) | third;
-        encoded.push(ALPHABET[(value >> 18) as usize & 0x3f] as char);
-        encoded.push(ALPHABET[(value >> 12) as usize & 0x3f] as char);
-        if chunk.len() > 1 {
-            encoded.push(ALPHABET[(value >> 6) as usize & 0x3f] as char);
-        } else {
-            encoded.push('=');
-        }
-        if chunk.len() > 2 {
-            encoded.push(ALPHABET[value as usize & 0x3f] as char);
-        } else {
-            encoded.push('=');
-        }
-    }
-    encoded
+    STANDARD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -239,6 +229,12 @@ mod tests {
         );
         assert!(encoded.contains("m=1;"));
         assert!(encoded.ends_with("\x1b_Gm=0;\x1b\\"));
+    }
+
+    #[test]
+    fn base64_encoding_uses_standard_alphabet_and_padding() {
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+        assert_eq!(base64_encode(b"abc"), "YWJj");
     }
 
     #[test]

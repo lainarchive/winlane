@@ -150,9 +150,9 @@ impl Frame {
         Self::new(width, height, pixels)
     }
 
-    pub fn scaled_catmull_rom(&self, width: u32, height: u32) -> ViewResult<Self> {
+    pub fn scaled_catmull_rom_rgb_bytes(&self, width: u32, height: u32) -> ViewResult<Vec<u8>> {
         if width == self.width && height == self.height {
-            return Ok(self.clone());
+            return Ok(self.rgb_bytes());
         }
         if width == 0 || height == 0 {
             return Err(ViewError::EmptyFrame);
@@ -182,8 +182,18 @@ impl Frame {
         );
         CATMULL_ROM_RESIZER
             .with_borrow_mut(|resizer| resizer.resize(&source, &mut destination, &options))?;
+        Ok(destination.into_vec())
+    }
 
-        let bytes = destination.into_vec();
+    pub fn scaled_catmull_rom(&self, width: u32, height: u32) -> ViewResult<Self> {
+        if width == self.width && height == self.height {
+            return Ok(self.clone());
+        }
+        if width == 0 || height == 0 {
+            return Err(ViewError::EmptyFrame);
+        }
+        let len = width as usize * height as usize;
+        let bytes = self.scaled_catmull_rom_rgb_bytes(width, height)?;
         let mut pixels = Vec::with_capacity(len);
         for channel in bytes.as_chunks::<3>().0 {
             pixels.push(Rgb8::new(channel[0], channel[1], channel[2]));
@@ -244,6 +254,26 @@ mod tests {
                 assert_eq!(scaled.pixel(x, y), frame.pixel(x, y));
             }
         }
+    }
+
+    #[test]
+    fn catmull_rom_rgb_bytes_have_exact_dimensions_and_native_exact_scale() {
+        let frame = Frame::new(
+            3,
+            2,
+            (0..6)
+                .map(|index| Rgb8::new(index as u8, (index * 5) as u8, (index * 11) as u8))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame.scaled_catmull_rom_rgb_bytes(3, 2).unwrap(),
+            frame.rgb_bytes()
+        );
+        let scaled = frame.scaled_catmull_rom_rgb_bytes(5, 3).unwrap();
+        assert_eq!(scaled.len(), 5 * 3 * 3);
+        let scaled_frame = frame.scaled_catmull_rom(5, 3).unwrap();
+        assert_eq!(scaled, scaled_frame.rgb_bytes());
     }
 
     #[test]
