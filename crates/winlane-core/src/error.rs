@@ -33,6 +33,8 @@ pub enum CoreError {
     InvalidHandle(String),
     #[error("qemu command failed: {0}")]
     Qemu(String),
+    #[error("hyper-v command failed: {0}")]
+    HyperV(String),
     #[error("unsupported control operation: {0}")]
     Unsupported(&'static str),
     #[error("timed out waiting for {0}")]

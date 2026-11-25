@@ -1,6 +1,6 @@
 # Hyper-V backend architecture
 
-Status: stage-one architecture decision only. There is no Hyper-V backend implementation or host validation yet. The current supported backend remains Linux x86_64 QEMU/KVM.
+Status: experimental, unvalidated lifecycle command-construction groundwork exists in `winlane-core::HyperVBackend`. It is not wired into the control daemon, the workspace is not portable to Windows yet, and there is no host validation. The current supported backend remains Linux x86_64 QEMU/KVM.
 
 ## Decision
 
@@ -79,6 +79,20 @@ The first implementation slice should be deliberately smaller than full parity:
 9. Evidence: preserve current append-only events. Record backend capability/version facts without embedding credentials or host secrets.
 
 Explicitly out of the first slice: Windows unattended provisioning, QEMU disk conversion tooling, networking automation beyond an existing host-selected switch, clones/restores across hosts, production checkpoints, Enhanced Session Mode automation, multi-user interactive sessions, and live migration.
+
+## Current lifecycle groundwork boundary
+
+`winlane-core::HyperVBackend` now contains only the conservative lifecycle core: create/define, start, stop, status, list, and destroy through PowerShell Hyper-V cmdlets, using a differencing VHDX over an existing golden VHDX. It is compile-safe on Linux but every lifecycle operation fails closed at runtime unless it is running on Windows. The implementation is deliberately not wired into the Unix-socket control daemon yet: the daemon transport itself is Linux-specific, so backend selection there would be untestable scaffolding rather than a usable Windows vertical slice.
+
+The first implementation accepts only isolated networking and removes VM network adapters rather than pretending NAT semantics exist without host-switch automation. It requires a golden VHDX, rejects ISO provisioning, uses Generation 2 with Secure Boot, and configures a local key protector before enabling vTPM when `spec.tpm` is set. The persisted effective disk size is the backing VHDX virtual size rounded up to whole GiB; explicit requests larger than the backing disk fail closed because differencing-disk expansion is not yet validated. Clone, checkpoint, frame, hardware-input, and guest-control operations return explicit unsupported errors rather than fake success.
+
+Portability required before this can become host-capable:
+
+1. Split the control transport so Unix sockets remain the Linux implementation while Windows receives a supported named-pipe or equivalent local authenticated transport.
+2. Gate Unix-only QEMU process, socket, and permission code so Windows can compile the shared contracts, core dispatch, IPC framing, and CLI surface.
+3. Add a narrow backend enum in the control daemon that selects QEMU for existing `qemu` records and Hyper-V for `hyperv` records, while creation chooses only the supported host backend unless an explicit validated configuration says otherwise.
+4. Keep Hyper-V frame/input/checkpoint operations fail-closed until WMI thumbnail/input and standard-checkpoint behavior are validated on the real Windows host.
+5. Only after those steps compile and pass on both platforms should `HyperVBackend` be wired into daemon creation and real host validation begin.
 
 ## Implementation seam preparation
 
