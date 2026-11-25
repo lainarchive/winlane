@@ -14,10 +14,10 @@ A claim belongs in this tier only after three clean end-to-end runs.
 
 - Windows x86_64 host with WHPX
 - macOS Apple silicon host with Windows 11 ARM64
-- independent validation of terminal graphics beyond the supported Kitty path
+- independent validation of terminal graphics beyond kitty, Ghostty, and WezTerm
 - higher-rate guest-side capture
 
-Experimental means the code exists and has run once. It does not mean the path is supportable. Ghostty, WezTerm, iTerm2, sixel, and tmux are not experimental rendering variants at runtime: they conservatively use the supported half-block preview fallback until independently validated. Released tmux does not reliably manage Kitty image placements per pane. iTerm2 is detected only as an unsupported inline-image variant; Kitty graphics is not enabled there at any version, so the viewer uses half-block fallback.
+Experimental means the code exists and has run once. It does not mean the path is supportable. kitty, Ghostty, and WezTerm use the high-resolution Kitty graphics path; see `terminal-matrix.md` for the exact validated versions and evidence. iTerm2, sixel, tmux, and other terminals are not experimental rendering variants at runtime: they conservatively use the supported half-block preview fallback until independently validated. Released tmux does not reliably manage Kitty image placements per pane. iTerm2 is detected only as an unsupported inline-image variant; Kitty graphics is not enabled there at any version, so the viewer uses half-block fallback.
 
 ## Out of scope for the first release
 

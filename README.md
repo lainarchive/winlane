@@ -48,7 +48,7 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
 - MCP evidence sequences stayed contiguous, redacted sensitive process arguments and typed text, and content-addressed large output blobs
 - two concurrent Windows machines reached guest-agent readiness, captured frames, survived daemon SIGTERM cleanup without recovery boots, restarted cleanly, and were destroyed with no QEMU, swtpm, daemon, or MCP processes left
-- exact Kitty rendering was visually validated under official kitty 0.51.1/Xvfb: the Windows desktop kept the correct aspect ratio, text was plainly readable in a full-height pane, zoom/pan geometry stayed consistent, and terminal click inverse mapping reached the intended guest pixel exactly
+- exact Kitty-protocol rendering was visually validated under Xvfb: official kitty 0.51.1 passed prior geometry/input validation, while WezTerm 20240203-110809-5046fc22 and Ghostty 1.1.3 matched the aspect-fit `RenderPlan` exactly through initial layout, font zoom, window resize, and split-pane phases, with exact terminal click inverse mapping
 - release live-view capture pacing reached 5.00 captures/s in idle and visibly changing Windows sessions at the default `--fps 5`
 - the committed demo harness completed a real 145.234-second Windows recording on the exact integrated build; initial capture started only after interactive desktop readiness, Notepad first-run popup dismissal was verified absent, post-restore ValuePattern text matched `before checkpoint` exactly, and evidence, cleanup, and golden-image integrity passed
 - raw-view UI Automation exposed the legacy Run dialog field that the control view did not; raw-path set-text and correct-runtime-id invoke both succeeded on real Windows
@@ -59,7 +59,7 @@ Not yet proven end-to-end:
 
 - hardware keyboard input is limited to printable ASCII plus newline and tab, paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
-- terminal input behavior across a matrix of real terminal emulators beyond the validated kitty/Xvfb path
+- terminal input behavior across real terminal emulators beyond the validated kitty, Ghostty, and WezTerm X11 paths
 - live-view throughput above the validated 5 captures/s default
 - long-running stability and broader concurrent machine use
 
@@ -74,7 +74,7 @@ Host:
 - OVMF UEFI firmware
 - swtpm
 - Rust stable, using the repository toolchain file
-- kitty for the validated Kitty-graphics high-resolution path, or any truecolor terminal for the half-block preview fallback; Ghostty, WezTerm, iTerm2, tmux, and sixel currently use conservative fallback behavior until independently validated
+- kitty, Ghostty, or WezTerm for the validated Kitty-graphics high-resolution path, or any truecolor terminal for the half-block preview fallback; iTerm2, tmux, and sixel currently use conservative fallback behavior until independently validated
 
 Guest media:
 
@@ -184,7 +184,7 @@ cargo run --release -p winlane-cli -- view \
 
 Ctrl-Q detaches. Terminal paste normalizes line endings and rejects control bytes or invisible formatting characters before anything is typed into the guest. Unsupported Unicode text is rejected by the hardware keyboard path rather than being turned into incorrect key events.
 
-Kitty-protocol terminals receive PNG frames that winlane scales host-side with CatmullRom to the exact aspect-fit physical-pixel rectangle. Frames are transmitted at that exact pixel size without terminal `c`/`r` rescaling and positioned with cursor row/column plus `X`/`Y` subcell offsets, so visual geometry and input inverse mapping share the same `RenderPlan`. winlane uses real terminal pixel geometry from `TIOCGWINSZ` when available and the `--cell-width-px`/`--cell-height-px` values as fallback geometry. Fit-to-pane can still be physically small in a split pane. Use `--zoom PERCENT` (100-400) for a fixed center crop, then Ctrl+Arrow keys to pan the crop. The zoom is a viewport crop, not a claim that a tiny pane can show the whole desktop readably.
+kitty, Ghostty, and WezTerm receive PNG frames that winlane scales host-side with CatmullRom to the exact aspect-fit physical-pixel rectangle. Frames are transmitted at that exact pixel size without terminal `c`/`r` rescaling and positioned with cursor row/column plus `X`/`Y` subcell offsets, so visual geometry and input inverse mapping share the same `RenderPlan`. winlane uses real terminal pixel geometry from `TIOCGWINSZ` when available and the `--cell-width-px`/`--cell-height-px` values as fallback geometry. Fit-to-pane can still be physically small in a split pane. Use `--zoom PERCENT` (100-400) for a fixed center crop, then Ctrl+Arrow keys to pan the crop. The zoom is a viewport crop, not a claim that a tiny pane can show the whole desktop readably.
 
 Outside Kitty-protocol terminals winlane uses half-blocks only as a preview fallback and reserves a terminal row labeled `HALF-BLOCK PREVIEW` when there is enough space. Kitty passthrough inside tmux is not enabled: released tmux (through 3.8) does not reliably manage Kitty placements per pane, and the pane-aware implementation exists only in unreleased tmux master/next-3.9 work. Manual APC passthrough cannot provide reliable pane clipping or redraw semantics, so tmux deliberately keeps the preview fallback.
 

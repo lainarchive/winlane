@@ -163,7 +163,7 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "ghostty" {
         return capabilities(
-            GraphicsProtocol::HalfBlock,
+            GraphicsProtocol::Kitty,
             DetectionSource::Ghostty,
             truecolor,
             tmux,
@@ -171,7 +171,7 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "wezterm" {
         return capabilities(
-            GraphicsProtocol::HalfBlock,
+            GraphicsProtocol::Kitty,
             DetectionSource::WezTerm,
             truecolor,
             tmux,
@@ -255,10 +255,17 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_conservatively_uses_half_block_until_validated() {
+    fn ghostty_uses_kitty_graphics_after_validation() {
         let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "ghostty")]));
-        assert_eq!(detected.protocol, GraphicsProtocol::HalfBlock);
+        assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
         assert_eq!(detected.source, DetectionSource::Ghostty);
+    }
+
+    #[test]
+    fn wezterm_uses_kitty_graphics_after_validation() {
+        let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "WezTerm")]));
+        assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
+        assert_eq!(detected.source, DetectionSource::WezTerm);
     }
 
     #[test]
@@ -281,6 +288,22 @@ mod tests {
                 ],
                 GraphicsProtocol::Kitty,
                 DetectionSource::KittyWindowId,
+                true,
+                true,
+            ),
+            (
+                "ghostty validated kitty graphics",
+                vec![("TERM_PROGRAM", "ghostty"), ("COLORTERM", "truecolor")],
+                GraphicsProtocol::Kitty,
+                DetectionSource::Ghostty,
+                true,
+                true,
+            ),
+            (
+                "wezterm validated kitty graphics",
+                vec![("TERM_PROGRAM", "WezTerm"), ("COLORTERM", "truecolor")],
+                GraphicsProtocol::Kitty,
+                DetectionSource::WezTerm,
                 true,
                 true,
             ),
