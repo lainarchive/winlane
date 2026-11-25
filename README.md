@@ -4,7 +4,7 @@ Disposable Windows machines for coding agents, visible and controllable from a t
 
 winlane is local-first. It provisions Windows into a golden qcow2 image, boots copy-on-write machines under QEMU/KVM, exposes the display in a terminal, and gives agents two control planes: hardware input through QMP and semantic Windows UI Automation through the guest agent.
 
-The first supported path is narrow on purpose: Linux x86_64, KVM, QEMU, Windows 11 x64, UEFI, swtpm, virtio drivers, isolated networking, and kitty or truecolor half-block terminal rendering.
+The first supported path is narrow on purpose: Linux x86_64, KVM, QEMU, Windows 11 x64, UEFI, swtpm, virtio drivers, isolated or QEMU user-mode NAT networking, and kitty or truecolor half-block terminal rendering.
 
 ## Why
 
@@ -236,7 +236,7 @@ cargo run -p winlane-cli -- machine stop \
   --machine-json "$machine"
 ```
 
-The daemon does not yet have a shutdown RPC. SIGINT and SIGTERM remove the Unix control socket; SIGKILL can leave a stale socket file, which the next daemon startup replaces when no active listener is present.
+The daemon does not yet have a shutdown RPC. SIGINT and SIGTERM enumerate recorded machines, stop those still running or paused, then remove the Unix control socket. SIGKILL can leave a stale socket file, which the next daemon startup replaces when no active listener is present.
 
 ## Architecture
 
