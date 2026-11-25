@@ -152,12 +152,24 @@ pub fn import_workspace_blocking<T: QgaTransport>(
             ],
             600_000,
         )?;
-        finalize_guest_workspace(control, &staging_dir, guest_dir, &backup_dir, overwrite)?;
+        if let Err(error) =
+            finalize_guest_workspace(control, &staging_dir, guest_dir, &backup_dir, overwrite)
+        {
+            if matches!(error, UiaError::DestinationExists) {
+                return Err(error);
+            }
+            return Err(UiaError::WorkspaceFinalizeFailed {
+                backup_path: backup_dir.clone(),
+                message: error.to_string(),
+            });
+        }
         Ok::<(u64, String), UiaError>((bytes, sha256))
     })();
     cleanup_guest_path(control, &archive_guest_path, false);
     cleanup_guest_path(control, &staging_dir, true);
-    cleanup_guest_path(control, &backup_dir, true);
+    if result.is_ok() {
+        cleanup_guest_path(control, &backup_dir, true);
+    }
     let (bytes, sha256) = result?;
     Ok(WorkspaceTransferRef {
         sha256,
@@ -363,7 +375,7 @@ fn prepare_guest_file_parent<T: QgaTransport>(
 ) -> UiaResult<()> {
     let target = ps_quote(target);
     let script = format!(
-        "$parent=Split-Path -Parent {target};if($parent){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};exit 0"
+        "$parent=Split-Path -Parent {target};if($parent){{New-Item -ItemType Directory -Force -LiteralPath $parent|Out-Null}};exit 0"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     if capture.exit_code == Some(0) {
@@ -419,7 +431,7 @@ fn prepare_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};New-Item -ItemType Directory -Force -Path $staging|Out-Null;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}}"
+        "$staging={staging};$target={target};New-Item -ItemType Directory -Force -LiteralPath $staging|Out-Null;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}}"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     match capture.exit_code {
@@ -449,7 +461,7 @@ fn finalize_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
+        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent){{New-Item -ItemType Directory -Force -LiteralPath $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
     );
     let capture = run_powershell(control, &script, 60_000)?;
     match capture.exit_code {
@@ -659,16 +671,25 @@ impl Drop for HostArchive {
     }
 }
 
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
+}
+
 fn private_archive() -> UiaResult<HostArchive> {
     for counter in 0..100 {
         let directory = std::env::temp_dir().join(unique_leaf_name("winlane-archive-", counter));
-        match fs::create_dir(&directory) {
+        match create_private_dir(&directory) {
             Ok(()) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&directory, fs::Permissions::from_mode(0o700));
-                }
                 return Ok(HostArchive {
                     path: directory.join("workspace.tar"),
                     directory,
@@ -735,11 +756,13 @@ fn create_workspace_archive(source: &Path) -> UiaResult<(HostArchive, ArchiveSta
     }
     let mut entries = Vec::new();
     let mut file_bytes = 0_u64;
+    let mut case_keys = HashSet::new();
     collect_source_entries(
         source,
         "",
         &mut entries,
         &mut file_bytes,
+        &mut case_keys,
         ArchiveLimits::default(),
     )?;
     entries.sort_by(|left, right| left.relative.cmp(&right.relative));
@@ -782,6 +805,7 @@ fn collect_source_entries(
     prefix: &str,
     entries: &mut Vec<SourceEntry>,
     file_bytes: &mut u64,
+    case_keys: &mut HashSet<String>,
     limits: ArchiveLimits,
 ) -> UiaResult<()> {
     let mut children = Vec::new();
@@ -841,6 +865,12 @@ fn collect_source_entries(
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
+        // Conservative Windows collision key: Unicode lowercase over the normalized `/` path.
+        if !case_keys.insert(relative.to_lowercase()) {
+            return Err(UiaError::UnsafeArchiveEntry(format!(
+                "case-insensitive duplicate archive member {relative}"
+            )));
+        }
         entries.push(SourceEntry {
             relative: relative.clone(),
             path: path.clone(),
@@ -849,7 +879,7 @@ fn collect_source_entries(
             mtime,
         });
         if directory_entry {
-            collect_source_entries(&path, &relative, entries, file_bytes, limits)?;
+            collect_source_entries(&path, &relative, entries, file_bytes, case_keys, limits)?;
         }
     }
     Ok(())
@@ -1089,7 +1119,8 @@ fn extract_tar(
                     skip_tar_data(&mut reader, size)?;
                     continue;
                 };
-                if !seen.insert(relative.clone()) {
+                // Conservative Windows collision key: Unicode lowercase over the normalized `/` path.
+                if !seen.insert(relative.to_lowercase()) {
                     return Err(UiaError::UnsafeArchiveEntry(format!(
                         "duplicate archive member {relative}"
                     )));
@@ -1407,13 +1438,8 @@ impl StagingDirectory {
         fs::create_dir_all(parent).map_err(|error| host_io(parent, error))?;
         for counter in 0..100 {
             let path = parent.join(unique_leaf_name(".winlane-workspace-", counter));
-            match fs::create_dir(&path) {
+            match create_private_dir(&path) {
                 Ok(()) => {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
-                    }
                     return Ok(Self {
                         target: target.to_path_buf(),
                         path,
@@ -1809,6 +1835,59 @@ mod tests {
         staging.persist().unwrap();
         assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
         assert!(!target.join("old.txt").exists());
+    }
+
+    #[test]
+    fn workspace_archive_rejects_case_insensitive_duplicate_paths() {
+        let temp = TestTempDir::new();
+        let source = temp.path.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Foo"), b"upper").unwrap();
+        fs::write(source.join("foo"), b"lower").unwrap();
+        let result = create_workspace_archive(&source);
+        assert!(matches!(result, Err(UiaError::UnsafeArchiveEntry(_))));
+    }
+
+    #[test]
+    fn archive_extraction_rejects_case_insensitive_duplicate_paths() {
+        let temp = TestTempDir::new();
+        let target = temp.path.join("target");
+        fs::create_dir(&target).unwrap();
+        let mut archive = make_archive_entry("dir/Foo", b'0', b"a");
+        archive.extend(make_archive_entry("dir/foo", b'0', b"b"));
+        let archive = finish_archive(archive);
+        let result = extract_bytes(&archive, &target);
+        assert!(matches!(result, Err(UiaError::UnsafeArchiveEntry(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_archive_and_workspace_staging_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let archive = private_archive().unwrap();
+        assert_eq!(
+            fs::metadata(&archive.directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let temp = TestTempDir::new();
+        let target = temp.path.join("target");
+        let staging = StagingDirectory::create(&target, true).unwrap();
+        assert_eq!(
+            fs::metadata(&staging.path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn powershell_literal_path_is_used_for_directory_creation() {
+        let source = include_str!("transfer.rs");
+        assert!(source.contains("New-Item -ItemType Directory -Force -LiteralPath $parent"));
+        assert!(source.contains("New-Item -ItemType Directory -Force -LiteralPath $staging"));
     }
 
     #[test]

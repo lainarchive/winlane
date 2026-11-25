@@ -253,6 +253,13 @@ pub enum UiaError {
     HostCommand(String),
     #[error("guest file hash or size mismatch after transfer")]
     TransferVerificationFailed,
+    #[error(
+        "workspace finalization failed; inspect preserved backup path {backup_path}: {message}"
+    )]
+    WorkspaceFinalizeFailed {
+        backup_path: String,
+        message: String,
+    },
 }
 
 pub type UiaResult<T> = Result<T, UiaError>;
