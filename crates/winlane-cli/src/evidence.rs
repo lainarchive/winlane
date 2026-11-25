@@ -19,16 +19,54 @@ fn export(args: &EvidenceExportArgs, output: &mut impl Write) -> CliResult<()> {
     if args.output.as_os_str().is_empty() {
         return Err(CliError::Usage("output path must be nonempty".to_string()));
     }
-    let store = open_existing(&args.evidence_dir)?;
-    store.export_jsonl(&args.output)?;
-    let bytes = std::fs::metadata(&args.output)?.len();
+    open_existing(&args.evidence_dir)?;
+    if args.output.exists() {
+        let metadata = std::fs::metadata(&args.output)?;
+        if !metadata.is_dir() || std::fs::read_dir(&args.output)?.next().is_some() {
+            return Err(CliError::Usage(format!(
+                "evidence export output must be absent or an empty directory: {}",
+                args.output.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(&args.output)?;
+    let events_output = args.output.join("events.jsonl");
+    std::fs::copy(args.evidence_dir.join("events.jsonl"), &events_output)?;
+    let events_bytes = std::fs::metadata(&events_output)?.len();
+
+    let blobs_output = args.output.join("blobs");
+    std::fs::create_dir_all(&blobs_output)?;
+    let mut blob_count = 0_u64;
+    let mut blob_bytes = 0_u64;
+    let blobs_input = args.evidence_dir.join("blobs");
+    if blobs_input.is_dir() {
+        for entry in std::fs::read_dir(blobs_input)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let name = entry.file_name();
+            let valid_blob_name = name.to_str().is_some_and(|name| {
+                name.len() == 64
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            });
+            if file_type.is_file() && valid_blob_name {
+                let target = blobs_output.join(&name);
+                blob_bytes += std::fs::copy(entry.path(), target)?;
+                blob_count += 1;
+            }
+        }
+    }
+
     write_json_line(
         output,
         &json!({
             "exported": true,
             "evidence_dir": args.evidence_dir,
             "output": args.output,
-            "bytes": bytes,
+            "events_bytes": events_bytes,
+            "blob_count": blob_count,
+            "blob_bytes": blob_bytes,
         }),
     )
 }
@@ -99,12 +137,15 @@ mod tests {
     #[test]
     fn export_copies_events_and_reports_output_shape() {
         let directory = tempfile::tempdir().unwrap();
-        let output_path = directory.path().join("nested/events.jsonl");
+        let output_path = directory.path().join("nested/export");
         let mut store = EvidenceStore::create(directory.path()).unwrap();
         store
             .record("machine_status", None, json!({"ok": true}))
             .unwrap();
         let expected = std::fs::read(directory.path().join("events.jsonl")).unwrap();
+        let blob_name = "a".repeat(64);
+        std::fs::write(directory.path().join("blobs").join(&blob_name), b"blob").unwrap();
+        std::fs::write(directory.path().join("blobs").join(".tmp-ignore"), b"tmp").unwrap();
         let mut output = Vec::new();
         export(
             &EvidenceExportArgs {
@@ -114,10 +155,20 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert_eq!(std::fs::read(&output_path).unwrap(), expected);
+        assert_eq!(
+            std::fs::read(output_path.join("events.jsonl")).unwrap(),
+            expected
+        );
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["exported"], true);
-        assert_eq!(value["bytes"], expected.len() as u64);
+        assert_eq!(value["events_bytes"], expected.len() as u64);
+        assert_eq!(value["blob_count"], 1);
+        assert_eq!(value["blob_bytes"], 4);
+        assert_eq!(
+            std::fs::read(output_path.join("blobs").join(&blob_name)).unwrap(),
+            b"blob"
+        );
+        assert!(!output_path.join("blobs").join(".tmp-ignore").exists());
         assert!(output.ends_with(b"\n"));
     }
 

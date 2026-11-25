@@ -196,12 +196,12 @@ The hardware-plane MCP tools cover machine creation, cloning, destruction, lifec
 
 Semantic guest MCP tools are implemented for UI tree, invoke, set-text, process execution, and file transfer. They appear in `tools/list`, but the MCP path has not yet been validated against a live Windows guest; use the guest CLI for the validated path until that proof lands.
 
-Export or inspect evidence events. Export currently copies `events.jsonl`; content-addressed blobs remain under the evidence directory and are not bundled yet:
+Export or inspect evidence. Export writes `events.jsonl` plus the content-addressed `blobs/` directory:
 
 ```sh
 cargo run -p winlane-cli -- evidence export \
   --evidence-dir /path/to/evidence \
-  --output /path/to/evidence-export.jsonl
+  --output /path/to/evidence-export
 
 cargo run -p winlane-cli -- evidence tail \
   --evidence-dir /path/to/evidence \
