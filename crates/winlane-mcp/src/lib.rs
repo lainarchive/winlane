@@ -14,7 +14,7 @@ use winlane_contracts::{
     NetworkMode, ScrollDirection, UiNodeRef,
 };
 use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
-use winlane_guest::uia::{BlockingUiaControl, UiaResult};
+use winlane_guest::uia::{BlockingUiaControl, UiaResult, UiaView};
 use winlane_ipc::{ControlRequest, IpcError, UnixControlClient};
 
 pub type McpResult<T> = Result<T, McpError>;
@@ -268,11 +268,13 @@ impl McpControlPlane {
         let machine = machine_input(input)?;
         let max_depth = optional_bounded_u64(input, "max_depth", 8, 1, 32)? as u16;
         let max_nodes = optional_bounded_u64(input, "max_nodes", 2000, 1, 20_000)? as u32;
+        let view = uia_view_input(input)?;
         self.semantic(
             machine,
             SemanticOperation::UiTree {
                 max_depth,
                 max_nodes,
+                view,
             },
         )
         .await
@@ -281,7 +283,8 @@ impl McpControlPlane {
     pub async fn ui_invoke(&self, input: &Value) -> McpResult<Value> {
         let machine = machine_input(input)?;
         let node = required_string(input, "node")?;
-        self.semantic(machine, SemanticOperation::Invoke { node })
+        let view = uia_view_input(input)?;
+        self.semantic(machine, SemanticOperation::Invoke { node, view })
             .await
     }
 
@@ -289,7 +292,8 @@ impl McpControlPlane {
         let machine = machine_input(input)?;
         let node = required_string(input, "node")?;
         let text = required_string(input, "text")?;
-        self.semantic(machine, SemanticOperation::SetText { node, text })
+        let view = uia_view_input(input)?;
+        self.semantic(machine, SemanticOperation::SetText { node, text, view })
             .await
     }
 
@@ -366,13 +370,16 @@ enum SemanticOperation {
     UiTree {
         max_depth: u16,
         max_nodes: u32,
+        view: UiaView,
     },
     Invoke {
         node: String,
+        view: UiaView,
     },
     SetText {
         node: String,
         text: String,
+        view: UiaView,
     },
     Run {
         command: String,
@@ -397,9 +404,12 @@ fn execute_semantic_operation<T: QgaTransport>(
         SemanticOperation::UiTree {
             max_depth,
             max_nodes,
-        } => control.ui_tree(max_depth, max_nodes),
-        SemanticOperation::Invoke { node } => control.invoke(&node_ref(&node)),
-        SemanticOperation::SetText { node, text } => control.set_text(&node_ref(&node), &text),
+            view,
+        } => control.ui_tree(max_depth, max_nodes, view),
+        SemanticOperation::Invoke { node, view } => control.invoke(&node_ref(&node), view),
+        SemanticOperation::SetText { node, text, view } => {
+            control.set_text(&node_ref(&node), &text, view)
+        }
         SemanticOperation::Run {
             command,
             args,
@@ -543,7 +553,8 @@ pub fn tool_definitions() -> Value {
             "properties": {
                 "machine": machine_ref,
                 "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8},
-                "max_nodes": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 2000}
+                "max_nodes": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 2000},
+                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
             },
             "required": ["machine"]
         }},
@@ -551,7 +562,8 @@ pub fn tool_definitions() -> Value {
             "type": "object",
             "properties": {
                 "machine": machine_ref,
-                "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"}
+                "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
+                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
             },
             "required": ["machine", "node"]
         }},
@@ -560,7 +572,8 @@ pub fn tool_definitions() -> Value {
             "properties": {
                 "machine": machine_ref,
                 "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
-                "text": {"type": "string", "maxLength": 4096}
+                "text": {"type": "string", "maxLength": 4096},
+                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
             },
             "required": ["machine", "node", "text"]
         }},
@@ -593,6 +606,14 @@ pub fn tool_definitions() -> Value {
             "required": ["machine", "guest_path", "host_path"]
         }}
     ])
+}
+
+fn uia_view_input(input: &Value) -> McpResult<UiaView> {
+    match optional_string(input, "view")?.as_deref() {
+        None => Ok(UiaView::Control),
+        Some(value) => UiaView::parse(value)
+            .ok_or_else(|| McpError::InvalidInput("view must be control or raw".to_string())),
+    }
 }
 
 fn machine_input(input: &Value) -> McpResult<MachineHandle> {
@@ -837,6 +858,13 @@ mod tests {
             )
             .await;
         assert!(matches!(bad_depth, Err(McpError::InvalidInput(_))));
+        let bad_view = mcp
+            .dispatch(
+                "ui_invoke",
+                &json!({"machine": machine_json(), "node": "0", "view": "content"}),
+            )
+            .await;
+        assert!(matches!(bad_view, Err(McpError::InvalidInput(_))));
         let bad_args = mcp
             .dispatch(
                 "process_run",

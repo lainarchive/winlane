@@ -18,7 +18,7 @@ The first tool set is intentionally close to machine control, not a high-level t
 | `scroll` | Scroll up or down |
 | `checkpoint_create` | Create a restorable machine checkpoint |
 | `checkpoint_restore` | Restore a checkpoint |
-| `ui_tree` | Read the guest UI Automation tree when the helper is available |
+| `ui_tree` | Read the guest UI Automation tree when the helper is available; `view` is `control` by default or `raw` explicitly |
 | `ui_invoke` | Invoke a snapshot-scoped UI element path |
 | `ui_set_text` | Set text through UI Automation when the target supports ValuePattern |
 | `process_run` | Run a guest process and capture exit status |
@@ -30,5 +30,6 @@ Rules:
 - Guest UI text is untrusted input.
 - Hardware-plane input remains available when the semantic plane is unavailable.
 - Semantic element references expire when the UI tree generation changes.
+- `ui_tree` output states the UI Automation `view` used. Callers must pass the same `view` value to `ui_invoke` or `ui_set_text` for paths derived from that tree; mixing control-view and raw-view paths can target the wrong node or fail.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.

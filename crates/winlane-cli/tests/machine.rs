@@ -259,6 +259,7 @@ async fn guest_machine_name_resolves_through_control_list_before_qga_connect() {
             machine_name: Some("builder".to_string()),
         },
         node: "0".to_string(),
+        view: winlane_guest::uia::UiaView::Control,
     });
     let mut output = Vec::new();
     let error = run_guest_command(&command, &mut output)

@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use winlane_contracts::{BootMode, NetworkMode};
+use winlane_guest::uia::UiaView;
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
@@ -17,9 +18,9 @@ pub const EVIDENCE_EXPORT_USAGE: &str =
     "usage: winlane evidence export --evidence-dir PATH --output PATH";
 pub const EVIDENCE_TAIL_USAGE: &str =
     "usage: winlane evidence tail --evidence-dir PATH [--limit N]";
-pub const GUEST_UI_TREE_USAGE: &str = "usage: winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N]";
-pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH";
-pub const GUEST_SET_TEXT_USAGE: &str = "usage: winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT";
+pub const GUEST_UI_TREE_USAGE: &str = "usage: winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]";
+pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw]";
+pub const GUEST_SET_TEXT_USAGE: &str = "usage: winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw]";
 pub const GUEST_RUN_USAGE: &str = "usage: winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]";
 pub const GUEST_IMPORT_USAGE: &str = "usage: winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH";
 pub const GUEST_EXPORT_USAGE: &str = "usage: winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
@@ -103,12 +104,14 @@ pub struct GuestUiTreeArgs {
     pub machine: GuestMachineArgs,
     pub max_depth: u16,
     pub max_nodes: u32,
+    pub view: UiaView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestInvokeArgs {
     pub machine: GuestMachineArgs,
     pub node: String,
+    pub view: UiaView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,7 @@ pub struct GuestSetTextArgs {
     pub machine: GuestMachineArgs,
     pub node: String,
     pub text: String,
+    pub view: UiaView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +573,7 @@ fn parse_guest_ui_tree_args(args: &[String]) -> Result<GuestUiTreeArgs, CliError
             "--control-socket",
             "--max-depth",
             "--max-nodes",
+            "--view",
         ],
     )?;
     let max_depth = match options.one("--max-depth", GUEST_UI_TREE_USAGE)? {
@@ -583,6 +588,7 @@ fn parse_guest_ui_tree_args(args: &[String]) -> Result<GuestUiTreeArgs, CliError
         machine: parse_guest_machine(&options, GUEST_UI_TREE_USAGE)?,
         max_depth,
         max_nodes,
+        view: parse_uia_view(&options, GUEST_UI_TREE_USAGE)?,
     })
 }
 
@@ -590,11 +596,18 @@ fn parse_guest_invoke_args(args: &[String]) -> Result<GuestInvokeArgs, CliError>
     let options = ParsedOptions::parse(
         args,
         GUEST_INVOKE_USAGE,
-        &["--machine-json", "--machine", "--control-socket", "--node"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--node",
+            "--view",
+        ],
     )?;
     Ok(GuestInvokeArgs {
         machine: parse_guest_machine(&options, GUEST_INVOKE_USAGE)?,
         node: options.required("--node", GUEST_INVOKE_USAGE)?.to_string(),
+        view: parse_uia_view(&options, GUEST_INVOKE_USAGE)?,
     })
 }
 
@@ -608,6 +621,7 @@ fn parse_guest_set_text_args(args: &[String]) -> Result<GuestSetTextArgs, CliErr
             "--control-socket",
             "--node",
             "--text",
+            "--view",
         ],
     )?;
     Ok(GuestSetTextArgs {
@@ -618,6 +632,7 @@ fn parse_guest_set_text_args(args: &[String]) -> Result<GuestSetTextArgs, CliErr
         text: options
             .required("--text", GUEST_SET_TEXT_USAGE)?
             .to_string(),
+        view: parse_uia_view(&options, GUEST_SET_TEXT_USAGE)?,
     })
 }
 
@@ -748,6 +763,15 @@ fn take_value<'a>(args: &'a [String], index: &mut usize, usage: &str) -> Result<
         .ok_or_else(|| CliError::Usage(format!("missing value for {flag}; {usage}")))?;
     *index += 1;
     Ok(value)
+}
+
+fn parse_uia_view(options: &ParsedOptions<'_>, usage: &str) -> Result<UiaView, CliError> {
+    match options.one("--view", usage)? {
+        None => Ok(UiaView::Control),
+        Some(value) => UiaView::parse(value).ok_or_else(|| {
+            CliError::Usage(format!("view must be control or raw, got {value}; {usage}"))
+        }),
+    }
 }
 
 fn parse_guest_machine(
@@ -1018,6 +1042,7 @@ mod tests {
                 machine: guest_json_target(),
                 max_depth: 8,
                 max_nodes: 2_000,
+                view: UiaView::Control,
             }))
         );
 
@@ -1030,12 +1055,27 @@ mod tests {
             "4".to_string(),
             "--max-nodes".to_string(),
             "50".to_string(),
+            "--view".to_string(),
+            "raw".to_string(),
         ];
         let Command::Guest(GuestCommand::UiTree(tree)) = parse_args(&bounded).unwrap() else {
             panic!("expected ui-tree command");
         };
         assert_eq!(tree.max_depth, 4);
         assert_eq!(tree.max_nodes, 50);
+        assert_eq!(tree.view, UiaView::Raw);
+
+        let invalid = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--node".to_string(),
+            "0".to_string(),
+            "--view".to_string(),
+            "content".to_string(),
+        ]);
+        assert!(matches!(invalid, Err(CliError::Usage(_))));
     }
 
     #[test]

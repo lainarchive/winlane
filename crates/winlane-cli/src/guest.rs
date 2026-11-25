@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use winlane_contracts::{MachineHandle, UiNodeRef};
 use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
-use winlane_guest::uia::BlockingUiaControl;
+use winlane_guest::uia::{BlockingUiaControl, UiaView};
 
 use crate::CliError;
 use crate::CliResult;
@@ -39,13 +39,16 @@ enum GuestOperation {
     UiTree {
         max_depth: u16,
         max_nodes: u32,
+        view: UiaView,
     },
     Invoke {
         node: String,
+        view: UiaView,
     },
     SetText {
         node: String,
         text: String,
+        view: UiaView,
     },
     Run {
         command: String,
@@ -67,9 +70,11 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
         GuestCommand::UiTree(args) => Ok(GuestOperation::UiTree {
             max_depth: args.max_depth,
             max_nodes: args.max_nodes,
+            view: args.view,
         }),
         GuestCommand::Invoke(args) => Ok(GuestOperation::Invoke {
             node: args.node.clone(),
+            view: args.view,
         }),
         GuestCommand::SetText(args) => {
             if args
@@ -84,6 +89,7 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
             Ok(GuestOperation::SetText {
                 node: args.node.clone(),
                 text: args.text.clone(),
+                view: args.view,
             })
         }
         GuestCommand::Run(args) => Ok(GuestOperation::Run {
@@ -118,9 +124,12 @@ fn execute_operation<T: QgaTransport>(
         GuestOperation::UiTree {
             max_depth,
             max_nodes,
-        } => Ok(control.ui_tree(*max_depth, *max_nodes)?),
-        GuestOperation::Invoke { node } => Ok(control.invoke(&node_ref(node))?),
-        GuestOperation::SetText { node, text } => Ok(control.set_text(&node_ref(node), text)?),
+            view,
+        } => Ok(control.ui_tree(*max_depth, *max_nodes, *view)?),
+        GuestOperation::Invoke { node, view } => Ok(control.invoke(&node_ref(node), *view)?),
+        GuestOperation::SetText { node, text, view } => {
+            Ok(control.set_text(&node_ref(node), text, *view)?)
+        }
         GuestOperation::Run {
             command,
             args,
@@ -328,6 +337,7 @@ mod tests {
             &GuestOperation::UiTree {
                 max_depth: 4,
                 max_nodes: 50,
+                view: UiaView::Raw,
             },
         )
         .unwrap();
@@ -354,7 +364,7 @@ mod tests {
 ",
         );
         assert!(xml.contains("InteractiveToken"));
-        assert!(xml.contains("-Mode tree -MaxDepth 4 -MaxNodes 50 -OutputPath"));
+        assert!(xml.contains("-Mode tree -MaxDepth 4 -MaxNodes 50 -View raw -OutputPath"));
         assert!(
             !requests
                 .iter()
@@ -370,6 +380,7 @@ mod tests {
             &mut control,
             &GuestOperation::Invoke {
                 node: "0/1/2".to_string(),
+                view: UiaView::Raw,
             },
         )
         .unwrap();
@@ -378,7 +389,7 @@ mod tests {
             "
 ",
         );
-        assert!(xml.contains("-Mode invoke -Path 0/1/2 -OutputPath"));
+        assert!(xml.contains("-Mode invoke -Path 0/1/2 -View raw -OutputPath"));
     }
 
     #[test]
@@ -390,6 +401,7 @@ mod tests {
             &GuestOperation::SetText {
                 node: "0/1/2".to_string(),
                 text: String::new(),
+                view: UiaView::Control,
             },
         )
         .unwrap();
@@ -398,6 +410,6 @@ mod tests {
             "
 ",
         );
-        assert!(xml.contains("-Mode settext -Path 0/1/2 -TextBase64  -OutputPath"));
+        assert!(xml.contains("-Mode settext -Path 0/1/2 -TextBase64  -View control -OutputPath"));
     }
 }
