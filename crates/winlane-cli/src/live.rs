@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
@@ -19,12 +20,13 @@ use winlane_ipc::{ControlRequest, UnixControlClient};
 use winlane_view::{
     DetachGuard, Frame, InputError, InputMapping, InputMappingContext, Key, KeyChord,
     MouseEventKind as ViewMouseEventKind, PastePolicy, TerminalEnvironment, TerminalGeometry,
-    ViewerInput, ViewportState, ZoomViewport, detect_capabilities, frame_from_artifact, map_input,
-    render_frame_with_fallback,
+    ViewerInput, ViewportState, ZoomViewport, detect_capabilities, frame_from_artifact,
+    frame_from_artifact_without_hash_validation, map_input, render_frame_with_fallback,
+    validate_frame_artifact_hash,
 };
 
 use crate::machine::resolve_machine;
-use crate::{CliError, CliResult, ViewArgs};
+use crate::{CliResult, ViewArgs};
 
 const INPUT_POLL_QUANTUM: Duration = Duration::from_millis(10);
 
@@ -78,8 +80,33 @@ impl LiveViewConfig {
 
 #[derive(Debug)]
 pub struct CapturedFrame {
-    pub frame: Frame,
-    pub sha256: String,
+    metadata: FrameRef,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl CapturedFrame {
+    pub fn sha256(&self) -> &str {
+        &self.metadata.sha256
+    }
+
+    pub fn width(&self) -> u32 {
+        self.metadata.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.metadata.height
+    }
+
+    pub fn decode_frame(&self) -> CliResult<Frame> {
+        Ok(frame_from_artifact(&self.metadata, &self.bytes)?)
+    }
+
+    fn decode_frame_without_hash_validation(&self) -> CliResult<Frame> {
+        Ok(frame_from_artifact_without_hash_validation(
+            &self.metadata,
+            &self.bytes,
+        )?)
+    }
 }
 
 struct TransientFrameCleanup {
@@ -127,12 +154,10 @@ pub async fn capture_transient_frame(
     let metadata_result = serde_json::from_value::<FrameRef>(result);
     let mut outcome = match metadata_result {
         Ok(metadata) => match tokio::fs::read(&metadata.blob_path).await {
-            Ok(bytes) => frame_from_artifact(&metadata, &bytes)
-                .map(|frame| CapturedFrame {
-                    frame,
-                    sha256: metadata.sha256,
-                })
-                .map_err(CliError::View),
+            Ok(bytes) => Ok(CapturedFrame {
+                metadata,
+                bytes: Arc::new(bytes),
+            }),
             Err(error) => Err(error.into()),
         },
         Err(error) => Err(error.into()),
@@ -230,24 +255,28 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
     loop {
         if Instant::now() >= next_capture {
             let captured = capture_transient_frame(&session.client, &session.machine).await?;
-            let crop = session
-                .zoom
-                .rect_for(captured.frame.width(), captured.frame.height())?;
+            let crop = session.zoom.rect_for(captured.width(), captured.height())?;
+            let validation_metadata = captured.metadata.clone();
+            let validation_bytes = Arc::clone(&captured.bytes);
+            let validation = tokio::task::spawn_blocking(move || {
+                validate_frame_artifact_hash(&validation_metadata, &validation_bytes)
+            });
             if frame_repaint_required(
                 last_frame.as_ref(),
-                &captured.sha256,
+                captured.sha256(),
                 crop,
                 session.viewport.full_repaint_required(),
             ) {
+                let frame = captured.decode_frame_without_hash_validation()?;
                 let cropped_frame;
                 let visible_frame = if crop.x == 0
                     && crop.y == 0
-                    && crop.width == captured.frame.width()
-                    && crop.height == captured.frame.height()
+                    && crop.width == frame.width()
+                    && crop.height == frame.height()
                 {
-                    &captured.frame
+                    &frame
                 } else {
-                    cropped_frame = captured.frame.crop(crop)?;
+                    cropped_frame = frame.crop(crop)?;
                     &cropped_frame
                 };
                 let output = render_frame_with_fallback(
@@ -255,16 +284,19 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
                     session.viewport.geometry(),
                     protocol,
                 )?;
+                validation.await??;
                 output.write_to(&mut session.stdout)?;
                 session.write_fallback_label()?;
                 session.viewport.repaint_completed();
                 last_frame = Some(DisplayedFrame {
                     plan: output.plan,
-                    frame_width: captured.frame.width(),
-                    frame_height: captured.frame.height(),
+                    frame_width: captured.width(),
+                    frame_height: captured.height(),
                     crop,
-                    sha256: captured.sha256,
+                    sha256: captured.sha256().to_string(),
                 });
+            } else {
+                validation.await??;
             }
             next_capture =
                 advance_capture_tick(next_capture, Instant::now(), config.frame_interval);
