@@ -149,7 +149,7 @@ cargo run -p winlane-cli -- view \
   --machine demo-1
 ```
 
-Ctrl-Q detaches. Terminal paste is normalized and stripped of control bytes before being typed into the guest. Unsupported Unicode text is dropped by the hardware keyboard path rather than being turned into incorrect key events.
+Ctrl-Q detaches. Terminal paste normalizes line endings and rejects control bytes or invisible formatting characters before anything is typed into the guest. Unsupported Unicode text is rejected by the hardware keyboard path rather than being turned into incorrect key events.
 
 ## Use the semantic guest plane
 
