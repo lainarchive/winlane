@@ -47,11 +47,13 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - a stopped-machine checkpoint restore followed by start reached a responsive guest agent and returned a real 57-node UI tree
 - paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
 - MCP evidence sequences stayed contiguous, redacted sensitive process arguments and typed text, and content-addressed large output blobs
+- raw-view UI Automation exposed the legacy Run dialog field that the control view did not; raw-path set-text and correct-runtime-id invoke both succeeded on real Windows
+- wrong-runtime-id semantic input failed before changing UI state; path-only input remained compatible
+- the ASCII keyboard matrix matched in Notepad for uppercase, lowercase, digits, space, shifted punctuation, tab, and Enter after accounting for Windows line endings; `ctrl+a` replacement matched exactly and unsupported Unicode was rejected before typing
 
 Not yet proven end-to-end:
 
-- Raw-view UI Automation support is implemented through the CLI and MCP interfaces, but it has not been live-validated on Windows; live-proven UI automation remains the default control view
-- keyboard input beyond lowercase alphanumeric text; input is currently paced at roughly 25 characters per second
+- hardware keyboard input is limited to printable ASCII plus newline and tab, paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across a matrix of real terminal emulators
 - long-running stability, concurrent machine use, and multi-machine cleanup
@@ -174,7 +176,7 @@ cargo run -p winlane-cli -- guest ui-tree \
   --max-nodes 2000
 ```
 
-The tree output states its `view`. UI operations default to `--view control`; pass `--view raw` to `ui-tree` to use the raw UI Automation walker. When invoking or setting text on a node path, pass the same view used to read the tree that produced the path. Also pass that node's `runtimeId` as `--runtime-id` when available; invoke and set-text then fail if the resolved path now points at an element with a different or unavailable runtime id. Path-only calls remain accepted for compatibility but are not identity-checked. Runtime-id verification is implemented but not live-validated yet.
+The tree output states its `view`. UI operations default to `--view control`; pass `--view raw` to `ui-tree` to use the raw UI Automation walker. When invoking or setting text on a node path, pass the same view used to read the tree that produced the path. Also pass that node's `runtimeId` as `--runtime-id` when available; invoke and set-text then fail if the resolved path now points at an element with a different or unavailable runtime id. Path-only calls remain accepted for compatibility but are not identity-checked. Runtime-id verification has been live-validated on raw-view invoke and set-text paths.
 
 Invoke an element from the current tree:
 
