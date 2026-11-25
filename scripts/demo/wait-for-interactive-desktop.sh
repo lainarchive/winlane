@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ $# -ne 5 ]]; then
-  echo "usage: $0 WINLANE_BIN CONTROL_SOCKET MACHINE_NAME TIMEOUT_SECONDS DEMO_DIR" >&2
+if [[ $# -ne 6 ]]; then
+  echo "usage: $0 WINLANE_BIN CONTROL_SOCKET MACHINE_NAME TIMEOUT_SECONDS DEMO_DIR PROBE_OUTPUT" >&2
   exit 2
 fi
 
@@ -11,6 +11,7 @@ control_socket=$2
 machine_name=$3
 timeout_seconds=$4
 demo_dir=$5
+probe_output=$6
 
 printf 'waiting up to %ss for interactive desktop UIA on %s\n' "$timeout_seconds" "$machine_name"
 deadline=$((SECONDS + timeout_seconds))
@@ -26,6 +27,7 @@ while (( SECONDS < deadline )); do
     --control-socket "$control_socket" \
     --timeout-seconds 20 \
     --arguments "$tree_args" ui_tree >"$tree_file" 2>"$tree_file.err"; then
+    cp -- "$tree_file" "$probe_output" 2>/dev/null || true
     if ready_output=$(python3 "$demo_dir/assert_interactive_desktop.py" "$tree_file" 2>&1); then
       printf '%s after %s check(s)\n' "$ready_output" "$checks"
       exit 0

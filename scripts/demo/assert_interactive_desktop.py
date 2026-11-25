@@ -20,28 +20,18 @@ def main():
     if not tree.get("ok") or not isinstance(tree.get("root"), dict):
         raise SystemExit("UI tree unavailable")
     nodes = list(walk(tree["root"]))
-    taskbar = next(
-        (
-            node
-            for node in nodes
-            if str(node.get("name") or "").strip().lower() == "taskbar"
-        ),
-        None,
-    )
     start = next(
         (
             node
             for node in nodes
             if str(node.get("name") or "").strip().lower() == "start"
+            and node.get("controlType") == "Button"
         ),
         None,
     )
-    if taskbar is None or start is None:
-        raise SystemExit("interactive desktop taskbar/start evidence absent")
-    print(
-        "interactive desktop ready: "
-        f"taskbar={taskbar.get('controlType')} start={start.get('controlType')}"
-    )
+    if start is None:
+        raise SystemExit("interactive desktop Start-button evidence absent")
+    print(f"interactive desktop ready: start={start.get('controlType')}")
 
 
 if __name__ == "__main__":

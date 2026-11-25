@@ -294,7 +294,7 @@ run "$winlane_bin" machine start \
   --control-socket "$control_socket" \
   --machine "$machine_name"
 run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_name" 120
-run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 120 "$demo_dir"
+run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 120 "$demo_dir" "$work_dir/interactive-desktop-initial.json"
 printf 'interactive desktop ready; enabling recording for demo actions\n'
 touch "$work_dir/ui-ready"
 while [[ ! -e $work_dir/recording-ready ]]; do
@@ -350,7 +350,7 @@ run "$winlane_bin" machine start \
   --control-socket "$control_socket" \
   --machine "$machine_name"
 run "$demo_dir/wait-for-guest.sh" "$winlane_bin" "$control_socket" "$machine_name" 90
-run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 90 "$demo_dir"
+run "$demo_dir/wait-for-interactive-desktop.sh" "$winlane_bin" "$control_socket" "$machine_name" 90 "$demo_dir" "$work_dir/interactive-desktop-restored.json"
 start_view
 
 tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
