@@ -336,6 +336,10 @@
         },
         "guest_path": {
           "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
@@ -394,6 +398,10 @@
         },
         "host_path": {
           "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [

@@ -2,6 +2,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -14,6 +15,7 @@ pub const POWERSHELL_GUEST_PATH: &str =
     r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
 const SCHTASKS_GUEST_PATH: &str = r"C:\Windows\System32\schtasks.exe";
 const CMD_GUEST_PATH: &str = r"C:\Windows\System32\cmd.exe";
+const TAR_GUEST_PATH: &str = r"C:\Windows\System32\tar.exe";
 const PROVISIONED_INTERACTIVE_USER: &str = "winlane";
 static INTERACTIVE_TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -237,8 +239,14 @@ pub enum UiaError {
     InvalidProcessArgument,
     #[error("process timeout must be 1..=600000 milliseconds")]
     InvalidTimeout,
-    #[error("file transfer is {actual} bytes; maximum is {maximum}")]
-    TransferTooLarge { actual: u64, maximum: u64 },
+    #[error("destination exists; pass overwrite explicitly to replace it")]
+    DestinationExists,
+    #[error("host archive command failed: {0}")]
+    HostCommand(String),
+    #[error("archive entry is unsafe or unsupported: {0}")]
+    UnsafeArchiveEntry(String),
+    #[error("guest file hash or size mismatch after transfer")]
+    TransferVerificationFailed,
 }
 
 pub type UiaResult<T> = Result<T, UiaError>;
@@ -302,68 +310,6 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         self.generation += 1;
         value["generation"] = Value::from(self.generation);
         Ok(value)
-    }
-
-    pub fn import_file_blocking(
-        &mut self,
-        host_path: &std::path::Path,
-        guest_path: &str,
-    ) -> UiaResult<FileTransferRef> {
-        validate_guest_file_path(guest_path)?;
-        let metadata = std::fs::metadata(host_path).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        if metadata.len() > crate::MAX_TRANSFER_BYTES {
-            return Err(UiaError::TransferTooLarge {
-                actual: metadata.len(),
-                maximum: crate::MAX_TRANSFER_BYTES,
-            });
-        }
-        let bytes = std::fs::read(host_path).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        if bytes.len() as u64 > crate::MAX_TRANSFER_BYTES {
-            return Err(UiaError::TransferTooLarge {
-                actual: bytes.len() as u64,
-                maximum: crate::MAX_TRANSFER_BYTES,
-            });
-        }
-        self.client.write_guest_file(guest_path, &bytes)?;
-        Ok(FileTransferRef {
-            sha256: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            host_path: host_path.to_string_lossy().into_owned(),
-            guest_path: guest_path.to_owned(),
-        })
-    }
-
-    pub fn export_file_blocking(
-        &mut self,
-        guest_path: &str,
-        host_path: &std::path::Path,
-    ) -> UiaResult<FileTransferRef> {
-        validate_guest_file_path(guest_path)?;
-        let bytes = self
-            .client
-            .read_guest_file(guest_path, crate::MAX_TRANSFER_BYTES)?;
-        if let Some(parent) = host_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| UiaError::HostIo {
-                path: parent.to_string_lossy().into_owned(),
-                source: error,
-            })?;
-        }
-        std::fs::write(host_path, &bytes).map_err(|error| UiaError::HostIo {
-            path: host_path.to_string_lossy().into_owned(),
-            source: error,
-        })?;
-        Ok(FileTransferRef {
-            sha256: sha256_hex(&bytes),
-            bytes: bytes.len() as u64,
-            host_path: host_path.to_string_lossy().into_owned(),
-            guest_path: guest_path.to_owned(),
-        })
     }
 
     pub fn invoke(
@@ -584,6 +530,311 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         }
     }
 
+    fn guest_file_info(&mut self, path: &str) -> UiaResult<(u64, String)> {
+        let quoted = path.replace('\'', "''");
+        let script = format!(
+            "$p='{quoted}'; if (!(Test-Path -LiteralPath $p -PathType Leaf)) {{ exit 3 }}; $i=Get-Item -LiteralPath $p; $h=Get-FileHash -LiteralPath $p -Algorithm SHA256; [Console]::WriteLine(('' + $i.Length + ':' + $h.Hash.ToLower()))"
+        );
+        let capture = self.run_process_blocking(
+            POWERSHELL_GUEST_PATH,
+            &[
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            600_000,
+        )?;
+        if capture.exit_code != Some(0) {
+            return Err(UiaError::Helper {
+                exit_code: capture.exit_code,
+                message: process_output_summary(&capture),
+            });
+        }
+        let text = String::from_utf8_lossy(&capture.stdout);
+        let (size, hash) = text.trim().split_once(':').ok_or(UiaError::InvalidUtf8)?;
+        Ok((
+            size.parse().map_err(|_| UiaError::InvalidUtf8)?,
+            hash.to_string(),
+        ))
+    }
+
+    fn write_host_file_to_guest(
+        &mut self,
+        host_path: &std::path::Path,
+        guest_path: &str,
+        overwrite: bool,
+    ) -> UiaResult<(u64, String)> {
+        use sha2::{Digest, Sha256};
+        let mut input = std::fs::File::open(host_path).map_err(|error| UiaError::HostIo {
+            path: host_path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+        let mode = if overwrite { "wb" } else { "wbx" };
+        let handle = self.client.file_open(guest_path, mode)?;
+        let mut hasher = Sha256::new();
+        let mut total = 0_u64;
+        let result = (|| {
+            loop {
+                let mut chunk = vec![0_u8; 1024 * 1024];
+                let count = input.read(&mut chunk).map_err(|error| UiaError::HostIo {
+                    path: host_path.to_string_lossy().into_owned(),
+                    source: error,
+                })?;
+                if count == 0 {
+                    break;
+                }
+                chunk.truncate(count);
+                hasher.update(&chunk);
+                self.client.file_write_chunks(handle, &chunk)?;
+                total += count as u64;
+            }
+            self.client.file_flush(handle)?;
+            Ok::<(), UiaError>(())
+        })();
+        let close = self.client.file_close(handle);
+        result.and(close.map_err(UiaError::Qga))?;
+        Ok((total, hex_digest(hasher)))
+    }
+
+    fn read_guest_file_to_host(
+        &mut self,
+        guest_path: &str,
+        host_path: &std::path::Path,
+        overwrite: bool,
+        expected: Option<(u64, &str)>,
+    ) -> UiaResult<(u64, String)> {
+        use sha2::{Digest, Sha256};
+        if host_path.exists() && !overwrite {
+            return Err(UiaError::DestinationExists);
+        }
+        let handle = self.client.file_open(guest_path, "rb")?;
+        let mut staging = StagingHostFile::create(host_path, overwrite)?;
+        let mut hasher = Sha256::new();
+        let mut total = 0_u64;
+        let result = (|| {
+            loop {
+                let chunk = self.client.file_read(handle, 1024 * 1024)?;
+                if !chunk.bytes.is_empty() {
+                    staging
+                        .file
+                        .write_all(&chunk.bytes)
+                        .map_err(|error| UiaError::HostIo {
+                            path: staging.path.to_string_lossy().into_owned(),
+                            source: error,
+                        })?;
+                    hasher.update(&chunk.bytes);
+                    total += chunk.bytes.len() as u64;
+                }
+                if chunk.eof {
+                    break;
+                }
+            }
+            staging.file.flush().map_err(|error| UiaError::HostIo {
+                path: staging.path.to_string_lossy().into_owned(),
+                source: error,
+            })?;
+            Ok::<(), UiaError>(())
+        })();
+        let close = self.client.file_close(handle);
+        result.and(close.map_err(UiaError::Qga))?;
+        let sha256 = hex_digest(hasher);
+        if let Some((expected_size, expected_hash)) = expected
+            && (total != expected_size || sha256 != expected_hash)
+        {
+            return Err(UiaError::TransferVerificationFailed);
+        }
+        staging.persist()?;
+        Ok((total, sha256))
+    }
+
+    fn verify_guest_file(&mut self, guest_path: &str, size: u64, sha256: &str) -> UiaResult<()> {
+        let (guest_size, guest_hash) = self.guest_file_info(guest_path)?;
+        if guest_size == size && guest_hash == sha256 {
+            Ok(())
+        } else {
+            Err(UiaError::TransferVerificationFailed)
+        }
+    }
+
+    pub fn import_file_blocking(
+        &mut self,
+        host_path: &std::path::Path,
+        guest_path: &str,
+        overwrite: bool,
+    ) -> UiaResult<FileTransferRef> {
+        validate_guest_transfer_path(guest_path)?;
+        let metadata = std::fs::metadata(host_path).map_err(|error| UiaError::HostIo {
+            path: host_path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+        if !metadata.is_file() {
+            return Err(UiaError::HostCommand(
+                "host import path is not a file".into(),
+            ));
+        }
+        let (bytes, sha256) = self.write_host_file_to_guest(host_path, guest_path, overwrite)?;
+        self.verify_guest_file(guest_path, bytes, &sha256)?;
+        Ok(FileTransferRef {
+            sha256,
+            bytes,
+            host_path: host_path.to_string_lossy().into_owned(),
+            guest_path: guest_path.to_owned(),
+        })
+    }
+
+    pub fn export_file_blocking(
+        &mut self,
+        guest_path: &str,
+        host_path: &std::path::Path,
+        overwrite: bool,
+    ) -> UiaResult<FileTransferRef> {
+        validate_guest_transfer_path(guest_path)?;
+        let (guest_size, guest_hash) = self.guest_file_info(guest_path)?;
+        let (bytes, sha256) = self.read_guest_file_to_host(
+            guest_path,
+            host_path,
+            overwrite,
+            Some((guest_size, &guest_hash)),
+        )?;
+        Ok(FileTransferRef {
+            sha256,
+            bytes,
+            host_path: host_path.to_string_lossy().into_owned(),
+            guest_path: guest_path.to_owned(),
+        })
+    }
+
+    fn prepare_guest_directory(&mut self, path: &str, overwrite: bool) -> UiaResult<()> {
+        let quoted = path.replace('\'', "''");
+        let script = if overwrite {
+            format!(
+                "$p='{quoted}'; New-Item -ItemType Directory -Force -Path $p | Out-Null; if ((Get-Item -LiteralPath $p) -isnot [System.IO.DirectoryInfo]) {{ exit 2 }}"
+            )
+        } else {
+            format!(
+                "$p='{quoted}'; if ((Test-Path -LiteralPath $p) -and (Get-ChildItem -LiteralPath $p -Force | Select-Object -First 1)) {{ exit 3 }}; New-Item -ItemType Directory -Force -Path $p | Out-Null"
+            )
+        };
+        let capture = self.run_process_blocking(
+            POWERSHELL_GUEST_PATH,
+            &[
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                script,
+            ],
+            30_000,
+        )?;
+        if capture.exit_code == Some(3) {
+            return Err(UiaError::DestinationExists);
+        }
+        if capture.exit_code != Some(0) {
+            return Err(UiaError::Helper {
+                exit_code: capture.exit_code,
+                message: process_output_summary(&capture),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn import_workspace_blocking(
+        &mut self,
+        host_dir: &std::path::Path,
+        guest_dir: &str,
+        overwrite: bool,
+    ) -> UiaResult<FileTransferRef> {
+        validate_guest_workspace_path(guest_dir)?;
+        validate_host_tree(host_dir)?;
+        self.prepare_guest_directory(guest_dir, overwrite)?;
+        let archive = temporary_host_archive(host_dir, true)?;
+        validate_host_archive(&archive.path)?;
+        let archive_path = archive.path.clone();
+        let unique = guest_unique_path("workspace-import.tar");
+        let result: UiaResult<(u64, String)> = (|| {
+            let (bytes, sha256) = self.write_host_file_to_guest(&archive_path, &unique, true)?;
+            self.verify_guest_file(&unique, bytes, &sha256)?;
+            self.run_checked(
+                TAR_GUEST_PATH,
+                &["-xf".into(), unique.clone(), "-C".into(), guest_dir.into()],
+                600_000,
+            )?;
+            Ok((bytes, sha256))
+        })();
+        let _ = self.run_process_blocking(
+            CMD_GUEST_PATH,
+            &["/c".into(), "del".into(), "/f".into(), "/q".into(), unique],
+            10_000,
+        );
+        let (bytes, sha256) = result?;
+        Ok(FileTransferRef {
+            sha256,
+            bytes,
+            host_path: host_dir.to_string_lossy().into_owned(),
+            guest_path: guest_dir.into(),
+        })
+    }
+
+    pub fn export_workspace_blocking(
+        &mut self,
+        guest_dir: &str,
+        host_dir: &std::path::Path,
+        overwrite: bool,
+    ) -> UiaResult<FileTransferRef> {
+        validate_guest_workspace_path(guest_dir)?;
+        prepare_host_directory(host_dir, overwrite)?;
+        let archive = temporary_host_archive(host_dir, false)?;
+        let archive_path = archive.path.clone();
+        let unique = guest_unique_path("workspace-export.tar");
+        let result: UiaResult<(u64, String)> = (|| {
+            self.run_checked(
+                TAR_GUEST_PATH,
+                &[
+                    "-cf".into(),
+                    unique.clone(),
+                    "-C".into(),
+                    guest_dir.into(),
+                    ".".into(),
+                ],
+                600_000,
+            )?;
+            let (guest_size, guest_hash) = self.guest_file_info(&unique)?;
+            let (bytes, sha256) = self.read_guest_file_to_host(
+                &unique,
+                &archive_path,
+                true,
+                Some((guest_size, &guest_hash)),
+            )?;
+            validate_host_archive(&archive_path)?;
+            extract_host_archive(&archive_path, host_dir)?;
+            Ok((bytes, sha256))
+        })();
+        let _ = self.run_process_blocking(
+            CMD_GUEST_PATH,
+            &["/c".into(), "del".into(), "/f".into(), "/q".into(), unique],
+            10_000,
+        );
+        let (bytes, sha256) = result?;
+        Ok(FileTransferRef {
+            sha256,
+            bytes,
+            host_path: host_dir.to_string_lossy().into_owned(),
+            guest_path: guest_dir.into(),
+        })
+    }
+
+    fn run_checked(&mut self, command: &str, args: &[String], timeout_ms: u64) -> UiaResult<()> {
+        let capture = self.run_process_blocking(command, args, timeout_ms)?;
+        if capture.exit_code == Some(0) {
+            Ok(())
+        } else {
+            Err(UiaError::Helper {
+                exit_code: capture.exit_code,
+                message: process_output_summary(&capture),
+            })
+        }
+    }
+
     pub fn run_process_blocking(
         &mut self,
         command: &str,
@@ -772,9 +1023,412 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+struct StagingHostFile {
+    target: std::path::PathBuf,
+    path: std::path::PathBuf,
+    file: std::fs::File,
+    overwrite: bool,
+    persisted: bool,
+}
+
+impl StagingHostFile {
+    fn create(target: &std::path::Path, overwrite: bool) -> UiaResult<Self> {
+        let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| UiaError::HostIo {
+            path: parent.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+        for counter in 0..100 {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let path = parent.join(format!(
+                ".winlane-transfer-{}-{nanos}-{counter}",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        target: target.to_path_buf(),
+                        path,
+                        file,
+                        overwrite,
+                        persisted: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(UiaError::HostIo {
+                        path: path.to_string_lossy().into_owned(),
+                        source: error,
+                    });
+                }
+            }
+        }
+        Err(UiaError::HostCommand(
+            "could not create staging file".into(),
+        ))
+    }
+
+    fn persist(mut self) -> UiaResult<()> {
+        let result = if self.overwrite {
+            std::fs::rename(&self.path, &self.target)
+        } else {
+            std::fs::hard_link(&self.path, &self.target)
+        };
+        match result {
+            Ok(()) => {
+                if self.overwrite {
+                    self.persisted = true;
+                } else {
+                    self.persisted = std::fs::remove_file(&self.path).is_ok();
+                }
+                Ok(())
+            }
+            Err(_) if !self.overwrite && self.target.exists() => Err(UiaError::DestinationExists),
+            Err(error) => Err(UiaError::HostIo {
+                path: self.target.to_string_lossy().into_owned(),
+                source: error,
+            }),
+        }
+    }
+}
+
+impl Drop for StagingHostFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn hex_digest(hasher: sha2::Sha256) -> String {
+    use sha2::Digest;
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn guest_unique_path(name: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!(
+        r"C:\Windows\Temp\winlane-{}-{nanos}-{name}",
+        std::process::id()
+    )
+}
+
+struct HostArchive {
+    directory: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+impl Drop for HostArchive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn private_archive() -> UiaResult<HostArchive> {
+    for counter in 0..100 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let directory = std::env::temp_dir().join(format!(
+            "winlane-transfer-{}-{nanos}-{counter}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &directory,
+                        std::fs::Permissions::from_mode(0o700),
+                    );
+                }
+                let path = directory.join("workspace.tar");
+                return Ok(HostArchive { directory, path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(UiaError::HostIo {
+                    path: directory.to_string_lossy().into_owned(),
+                    source: error,
+                });
+            }
+        }
+    }
+    Err(UiaError::HostCommand(
+        "could not create private archive directory".into(),
+    ))
+}
+
+fn validate_host_tree(path: &std::path::Path) -> UiaResult<()> {
+    fn walk(path: &std::path::Path, validate_name: bool) -> UiaResult<()> {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| UiaError::HostIo {
+            path: path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(UiaError::UnsafeArchiveEntry(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let stem = name.split('.').next().unwrap_or(name);
+        let reserved = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON"
+                | "PRN"
+                | "AUX"
+                | "NUL"
+                | "COM1"
+                | "COM2"
+                | "COM3"
+                | "COM4"
+                | "COM5"
+                | "COM6"
+                | "COM7"
+                | "COM8"
+                | "COM9"
+                | "LPT1"
+                | "LPT2"
+                | "LPT3"
+                | "LPT4"
+                | "LPT5"
+                | "LPT6"
+                | "LPT7"
+                | "LPT8"
+                | "LPT9"
+        );
+        if validate_name
+            && (name.is_empty()
+                || name.len() > 240
+                || reserved
+                || name.chars().any(|c| {
+                    c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\')
+                })
+                || name.ends_with(['.', ' ']))
+        {
+            return Err(UiaError::UnsafeArchiveEntry(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).map_err(|error| UiaError::HostIo {
+                path: path.to_string_lossy().into_owned(),
+                source: error,
+            })? {
+                let entry = entry.map_err(|error| UiaError::HostIo {
+                    path: path.to_string_lossy().into_owned(),
+                    source: error,
+                })?;
+                walk(&entry.path(), true)?;
+            }
+        } else if !metadata.is_file() {
+            return Err(UiaError::UnsafeArchiveEntry(
+                path.to_string_lossy().into_owned(),
+            ));
+        }
+        Ok(())
+    }
+    if !path.is_dir() {
+        return Err(UiaError::HostCommand(
+            "workspace host path is not a directory".into(),
+        ));
+    }
+    walk(path, false)
+}
+
+fn temporary_host_archive(source: &std::path::Path, create: bool) -> UiaResult<HostArchive> {
+    let archive = private_archive()?;
+    if create {
+        let status = std::process::Command::new("tar")
+            .arg("-cf")
+            .arg(&archive.path)
+            .arg("-C")
+            .arg(source)
+            .arg(".")
+            .status()
+            .map_err(|error| UiaError::HostIo {
+                path: archive.path.to_string_lossy().into_owned(),
+                source: error,
+            })?;
+        if !status.success() {
+            return Err(UiaError::HostCommand("tar archive creation failed".into()));
+        }
+    }
+    Ok(archive)
+}
+
+fn prepare_host_directory(path: &std::path::Path, overwrite: bool) -> UiaResult<()> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(UiaError::DestinationExists);
+        }
+        if !overwrite
+            && std::fs::read_dir(path)
+                .map_err(|error| UiaError::HostIo {
+                    path: path.to_string_lossy().into_owned(),
+                    source: error,
+                })?
+                .next()
+                .is_some()
+        {
+            return Err(UiaError::DestinationExists);
+        }
+    } else {
+        std::fs::create_dir_all(path).map_err(|error| UiaError::HostIo {
+            path: path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_host_archive(path: &std::path::Path) -> UiaResult<()> {
+    let list = std::process::Command::new("tar")
+        .arg("-tf")
+        .arg(path)
+        .output()
+        .map_err(|error| UiaError::HostIo {
+            path: path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+    if !list.status.success() {
+        return Err(UiaError::HostCommand("tar archive listing failed".into()));
+    }
+    for line in String::from_utf8_lossy(&list.stdout).lines() {
+        let normalized = line
+            .strip_prefix("./")
+            .unwrap_or(line)
+            .trim_end_matches('/');
+        if normalized.is_empty() || normalized == "." {
+            continue;
+        }
+        let bad = normalized.starts_with('/')
+            || normalized.contains('\\')
+            || normalized.as_bytes().get(1) == Some(&b':')
+            || normalized
+                .split('/')
+                .any(|part| part == ".." || part.is_empty());
+        if bad {
+            return Err(UiaError::UnsafeArchiveEntry(line.into()));
+        }
+    }
+    let verbose = std::process::Command::new("tar")
+        .arg("-tvf")
+        .arg(path)
+        .output()
+        .map_err(|error| UiaError::HostIo {
+            path: path.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+    for line in verbose.stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if !matches!(line.first(), Some(b'-') | Some(b'd')) {
+            return Err(UiaError::UnsafeArchiveEntry(
+                "non-file/non-directory entry".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn extract_host_archive(archive: &std::path::Path, target: &std::path::Path) -> UiaResult<()> {
+    let status = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(target)
+        .arg("--no-same-owner")
+        .arg("--no-same-permissions")
+        .status()
+        .map_err(|error| UiaError::HostIo {
+            path: target.to_string_lossy().into_owned(),
+            source: error,
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(UiaError::HostCommand("tar extraction failed".into()))
+    }
+}
+
+fn validate_guest_workspace_path(path: &str) -> UiaResult<()> {
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        return Err(UiaError::InvalidGuestPath);
+    }
+    validate_guest_transfer_path(path)
+}
+
+fn validate_guest_transfer_path(path: &str) -> UiaResult<()> {
+    let device = path.starts_with(r"\\.\")
+        || path.starts_with(r"\\?\")
+        || path.starts_with("//./")
+        || path.starts_with("//?/");
+    let traversal = path.split(['\\', '/']).any(|component| component == "..");
+    if device || traversal {
+        return Err(UiaError::InvalidGuestPath);
+    }
+    validate_guest_file_path(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    struct TestTempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TestTempDir {
+        fn new() -> Self {
+            for counter in 0..100 {
+                let nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default();
+                let path = std::env::temp_dir().join(format!(
+                    "winlane-test-{}-{nanos}-{counter}",
+                    std::process::id()
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self { path },
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create test temp dir: {error}"),
+                }
+            }
+            panic!("could not create test temp dir")
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn helper_contains_uia_operations() {
@@ -884,6 +1538,307 @@ mod tests {
             validate_process_inputs(r"C:\Windows\System32\cmd.exe", &[], 0),
             Err(UiaError::InvalidTimeout)
         ));
+    }
+
+    struct MemoryQgaTransport {
+        incoming: std::collections::VecDeque<Vec<u8>>,
+        requests: Vec<Value>,
+        written_file: Vec<u8>,
+        read_file: Vec<u8>,
+        read_position: usize,
+    }
+
+    impl MemoryQgaTransport {
+        fn new(read_file: Vec<u8>) -> Self {
+            Self {
+                incoming: std::collections::VecDeque::new(),
+                requests: Vec::new(),
+                written_file: Vec::new(),
+                read_file,
+                read_position: 0,
+            }
+        }
+    }
+
+    impl crate::qga::QgaTransport for MemoryQgaTransport {
+        fn write_raw(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_message(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            let request: Value = serde_json::from_slice(bytes).unwrap();
+            self.requests.push(request.clone());
+            let execute = request["execute"].as_str().unwrap();
+            let result = match execute {
+                "guest-file-open" => json!(1),
+                "guest-file-write" => {
+                    let encoded = request["arguments"]["buf-b64"].as_str().unwrap();
+                    self.written_file.extend(STANDARD.decode(encoded).unwrap());
+                    json!({})
+                }
+                "guest-file-flush" | "guest-file-close" => json!({}),
+                "guest-file-read" => {
+                    let count = request["arguments"]["count"].as_u64().unwrap() as usize;
+                    let end = (self.read_position + count).min(self.read_file.len());
+                    let bytes = self.read_file[self.read_position..end].to_vec();
+                    let read_count = bytes.len();
+                    self.read_position = end;
+                    json!({
+                        "buf-b64": STANDARD.encode(bytes),
+                        "count": read_count,
+                        "eof": self.read_position == self.read_file.len(),
+                    })
+                }
+                "guest-exec" => json!({ "pid": 7 }),
+                "guest-exec-status" => {
+                    let bytes = if self.read_file.is_empty() {
+                        &self.written_file
+                    } else {
+                        &self.read_file
+                    };
+                    json!({
+                        "exited": true,
+                        "exitcode": 0,
+                        "out-data": STANDARD.encode(format!("{}:{}\n", bytes.len(), sha256_hex(bytes))),
+                    })
+                }
+                other => panic!("unexpected qga request {other}"),
+            };
+            self.incoming
+                .push_back(json!({"return": result}).to_string().into_bytes());
+            Ok(())
+        }
+
+        fn read_message(&mut self) -> std::io::Result<Vec<u8>> {
+            self.incoming.pop_front().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "missing response")
+            })
+        }
+    }
+
+    #[test]
+    fn streamed_import_round_trips_chunk_boundary_bytes_in_bounded_requests() {
+        let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024 + 1).collect();
+        let temp = TestTempDir::new();
+        let host_path = temp.path().join("input.bin");
+        std::fs::write(&host_path, &bytes).unwrap();
+        let transport = MemoryQgaTransport::new(Vec::new());
+        let mut control = BlockingUiaControl::new(crate::qga::QgaClient::new(transport));
+        let (size, hash) = control
+            .write_host_file_to_guest(&host_path, r"C:\Temp\output.bin", false)
+            .unwrap();
+        assert_eq!(size, bytes.len() as u64);
+        assert_eq!(hash, sha256_hex(&bytes));
+        let transport = control.client.transport;
+        assert_eq!(transport.written_file, bytes);
+        let write_counts: Vec<u64> = transport
+            .requests
+            .iter()
+            .filter(|request| request["execute"] == "guest-file-write")
+            .map(|request| request["arguments"]["count"].as_u64().unwrap())
+            .collect();
+        assert_eq!(write_counts, vec![1024 * 1024, 1]);
+        let open = transport
+            .requests
+            .iter()
+            .find(|request| request["execute"] == "guest-file-open")
+            .unwrap();
+        assert_eq!(open["arguments"]["mode"], "wbx");
+    }
+
+    #[test]
+    fn streamed_export_round_trips_chunk_boundary_bytes() {
+        let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024 + 1).collect();
+        let transport = MemoryQgaTransport::new(bytes.clone());
+        let mut control = BlockingUiaControl::new(crate::qga::QgaClient::new(transport));
+        let temp = TestTempDir::new();
+        let host_path = temp.path().join("output.bin");
+        let (size, hash) = control
+            .read_guest_file_to_host(r"C:\Temp\input.bin", &host_path, false, None)
+            .unwrap();
+        assert_eq!(size, bytes.len() as u64);
+        assert_eq!(hash, sha256_hex(&bytes));
+        assert_eq!(std::fs::read(&host_path).unwrap(), bytes);
+        let read_counts: Vec<u64> = control
+            .client
+            .transport
+            .requests
+            .iter()
+            .filter(|request| request["execute"] == "guest-file-read")
+            .map(|request| request["arguments"]["count"].as_u64().unwrap())
+            .collect();
+        assert_eq!(read_counts, vec![1024 * 1024, 1024 * 1024]);
+        assert!(matches!(
+            control.read_guest_file_to_host(r"C:\Temp\input.bin", &host_path, false, None),
+            Err(UiaError::DestinationExists)
+        ));
+    }
+
+    #[test]
+    fn public_file_import_and_export_verify_exact_round_trip_hashes() {
+        let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024 + 1).collect();
+        let temp = TestTempDir::new();
+        let import_host = temp.path().join("import.bin");
+        std::fs::write(&import_host, &bytes).unwrap();
+        let transport = MemoryQgaTransport::new(Vec::new());
+        let mut control = BlockingUiaControl::new(crate::qga::QgaClient::new(transport));
+        let imported = control
+            .import_file_blocking(&import_host, r"C:\Temp\roundtrip.bin", false)
+            .unwrap();
+        assert_eq!(imported.bytes, bytes.len() as u64);
+        assert_eq!(imported.sha256, sha256_hex(&bytes));
+
+        let transport = MemoryQgaTransport::new(bytes.clone());
+        let mut control = BlockingUiaControl::new(crate::qga::QgaClient::new(transport));
+        let export_host = temp.path().join("export.bin");
+        let exported = control
+            .export_file_blocking(r"C:\Temp\roundtrip.bin", &export_host, false)
+            .unwrap();
+        assert_eq!(exported.bytes, bytes.len() as u64);
+        assert_eq!(exported.sha256, sha256_hex(&bytes));
+        assert_eq!(std::fs::read(&export_host).unwrap(), bytes);
+        let mut names: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["export.bin", "import.bin"]);
+    }
+
+    #[test]
+    fn transfer_paths_reject_device_and_traversal_paths() {
+        assert!(validate_guest_transfer_path(r"C:\Temp\file.txt").is_ok());
+        assert!(validate_guest_transfer_path(r"\\host\share\file.txt").is_ok());
+        for path in [
+            r"\\.\PhysicalDrive0",
+            r"\\?\C:\Temp\file.txt",
+            r"C:\workspace\..\evil.txt",
+        ] {
+            assert!(matches!(
+                validate_guest_transfer_path(path),
+                Err(UiaError::InvalidGuestPath)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_tree_rejects_windows_device_and_separator_names() {
+        let temp = TestTempDir::new();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for name in ["NUL", "bad\\name.txt"] {
+            std::fs::write(source.join(name), b"data").unwrap();
+            assert!(matches!(
+                validate_host_tree(&source),
+                Err(UiaError::UnsafeArchiveEntry(_))
+            ));
+            std::fs::remove_file(source.join(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn workspace_archive_round_trip_preserves_ordinary_tree_bytes() {
+        let temp = TestTempDir::new();
+        let source = temp.path().join("source");
+        let nested = source.join("alpha").join("nested");
+        let duplicate = source.join("beta").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&duplicate).unwrap();
+        std::fs::create_dir_all(source.join("empty-dir")).unwrap();
+        let binary: Vec<u8> = (0..=255).cycle().take(8193).collect();
+        std::fs::write(nested.join("same.bin"), &binary).unwrap();
+        std::fs::write(duplicate.join("same.bin"), b"different bytes").unwrap();
+        std::fs::write(source.join("empty.txt"), b"").unwrap();
+        let archive = temporary_host_archive(&source, true).unwrap();
+        validate_host_archive(&archive.path).unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        extract_host_archive(&archive.path, &target).unwrap();
+        assert_eq!(
+            sha256_hex(&std::fs::read(target.join("alpha/nested/same.bin")).unwrap()),
+            sha256_hex(&binary)
+        );
+        assert_eq!(
+            std::fs::read(target.join("beta/nested/same.bin")).unwrap(),
+            b"different bytes"
+        );
+        assert_eq!(std::fs::read(target.join("empty.txt")).unwrap(), b"");
+        assert!(target.join("empty-dir").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_tree_rejects_symlinks() {
+        let temp = TestTempDir::new();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("target.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink(source.join("target.txt"), source.join("link.txt")).unwrap();
+        assert!(matches!(
+            validate_host_tree(&source),
+            Err(UiaError::UnsafeArchiveEntry(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_validation_rejects_links() {
+        let temp = TestTempDir::new();
+        std::fs::write(temp.path().join("target.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink(temp.path().join("target.txt"), temp.path().join("link.txt"))
+            .unwrap();
+        let archive_path = temp.path().join("links.tar");
+        let status = std::process::Command::new("tar")
+            .arg("-cf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(temp.path())
+            .arg("target.txt")
+            .arg("link.txt")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(matches!(
+            validate_host_archive(&archive_path),
+            Err(UiaError::UnsafeArchiveEntry(_))
+        ));
+    }
+
+    #[test]
+    fn archive_validation_rejects_path_traversal() {
+        let temp = TestTempDir::new();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("evil.txt"), b"data").unwrap();
+        let archive_path = temp.path().join("traversal.tar");
+        let status = std::process::Command::new("tar")
+            .arg("-cf")
+            .arg(&archive_path)
+            .arg("--transform=s,evil,../evil,")
+            .arg("-C")
+            .arg(&source)
+            .arg("evil.txt")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(matches!(
+            validate_host_archive(&archive_path),
+            Err(UiaError::UnsafeArchiveEntry(_))
+        ));
+    }
+
+    #[test]
+    fn host_workspace_export_refuses_non_empty_destination_without_overwrite() {
+        let temp = TestTempDir::new();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("existing.txt"), b"data").unwrap();
+        assert!(matches!(
+            prepare_host_directory(&target, false),
+            Err(UiaError::DestinationExists)
+        ));
+        assert!(prepare_host_directory(&target, true).is_ok());
     }
 
     #[test]

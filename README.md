@@ -224,7 +224,7 @@ cargo run --release -p winlane-cli -- guest invoke \
 
 Node paths are snapshot-scoped. A path such as `0/1/3` can point somewhere else after windows open, close, or reorder. Generation checking is not reliable across separate guest connections, so use a fresh tree immediately before invoking and pass the runtime id when available.
 
-Import and export files explicitly:
+Import and export files explicitly. Transfers are chunked, size- and SHA-256-verified, and refuse to replace an existing destination unless `--overwrite` is passed:
 
 ```sh
 cargo run --release -p winlane-cli -- guest import \
@@ -238,6 +238,24 @@ cargo run --release -p winlane-cli -- guest export \
   --control-socket /tmp/winlane-control.sock \
   --guest-path 'C:\Windows\Temp\payload.txt' \
   --host-path ./payload.out.txt
+```
+
+Import or export an ordinary workspace tree with `--workspace`. Relative paths, empty files/directories, and file bytes are preserved through a verified tar stream; symlinks and unsafe or device-like paths are rejected. Without `--overwrite`, a non-empty destination is refused:
+
+```sh
+cargo run --release -p winlane-cli -- guest import \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
+  --host-path ./project \
+  --guest-path 'C:\workspace\project' \
+  --workspace
+
+cargo run --release -p winlane-cli -- guest export \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
+  --guest-path 'C:\workspace\project' \
+  --host-path ./project-out \
+  --workspace
 ```
 
 There is no shared clipboard and no host folder pass-through.

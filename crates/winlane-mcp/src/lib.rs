@@ -385,6 +385,7 @@ impl McpControlPlane {
             SemanticOperation::Import {
                 host_path,
                 guest_path,
+                overwrite: optional_bool(input, "overwrite")?.unwrap_or(false),
             },
         )
         .await
@@ -399,6 +400,7 @@ impl McpControlPlane {
             SemanticOperation::Export {
                 guest_path,
                 host_path,
+                overwrite: optional_bool(input, "overwrite")?.unwrap_or(false),
             },
         )
         .await
@@ -456,10 +458,12 @@ enum SemanticOperation {
     Import {
         host_path: PathBuf,
         guest_path: String,
+        overwrite: bool,
     },
     Export {
         guest_path: String,
         host_path: PathBuf,
+        overwrite: bool,
     },
 }
 
@@ -501,15 +505,21 @@ fn execute_semantic_operation<T: QgaTransport>(
         SemanticOperation::Import {
             host_path,
             guest_path,
-        } => Ok(serde_json::to_value(
-            control.import_file_blocking(&host_path, &guest_path)?,
-        )?),
+            overwrite,
+        } => Ok(serde_json::to_value(control.import_file_blocking(
+            &host_path,
+            &guest_path,
+            overwrite,
+        )?)?),
         SemanticOperation::Export {
             guest_path,
             host_path,
-        } => Ok(serde_json::to_value(
-            control.export_file_blocking(&guest_path, &host_path)?,
-        )?),
+            overwrite,
+        } => Ok(serde_json::to_value(control.export_file_blocking(
+            &guest_path,
+            &host_path,
+            overwrite,
+        )?)?),
     }
 }
 
@@ -683,7 +693,8 @@ pub fn tool_definitions() -> Value {
             "properties": {
                 "machine": machine_ref,
                 "host_path": {"type": "string"},
-                "guest_path": {"type": "string"}
+                "guest_path": {"type": "string"},
+                "overwrite": {"type": "boolean", "default": false}
             },
             "required": ["machine", "host_path", "guest_path"]
         }},
@@ -692,7 +703,8 @@ pub fn tool_definitions() -> Value {
             "properties": {
                 "machine": machine_ref,
                 "guest_path": {"type": "string"},
-                "host_path": {"type": "string"}
+                "host_path": {"type": "string"},
+                "overwrite": {"type": "boolean", "default": false}
             },
             "required": ["machine", "guest_path", "host_path"]
         }}

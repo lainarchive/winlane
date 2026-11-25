@@ -60,10 +60,14 @@ enum GuestOperation {
     Import {
         host_path: PathBuf,
         guest_path: String,
+        workspace: bool,
+        overwrite: bool,
     },
     Export {
         guest_path: String,
         host_path: PathBuf,
+        workspace: bool,
+        overwrite: bool,
     },
 }
 
@@ -104,10 +108,14 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
         GuestCommand::Import(args) => Ok(GuestOperation::Import {
             host_path: args.host_path.clone(),
             guest_path: args.guest_path.clone(),
+            workspace: args.workspace,
+            overwrite: args.overwrite,
         }),
         GuestCommand::Export(args) => Ok(GuestOperation::Export {
             guest_path: args.guest_path.clone(),
             host_path: args.host_path.clone(),
+            workspace: args.workspace,
+            overwrite: args.overwrite,
         }),
     }
 }
@@ -156,15 +164,23 @@ fn execute_operation<T: QgaTransport>(
         GuestOperation::Import {
             host_path,
             guest_path,
-        } => Ok(serde_json::to_value(
-            control.import_file_blocking(host_path, guest_path)?,
-        )?),
+            workspace,
+            overwrite,
+        } => Ok(serde_json::to_value(if *workspace {
+            control.import_workspace_blocking(host_path, guest_path, *overwrite)?
+        } else {
+            control.import_file_blocking(host_path, guest_path, *overwrite)?
+        })?),
         GuestOperation::Export {
             guest_path,
             host_path,
-        } => Ok(serde_json::to_value(
-            control.export_file_blocking(guest_path, host_path)?,
-        )?),
+            workspace,
+            overwrite,
+        } => Ok(serde_json::to_value(if *workspace {
+            control.export_workspace_blocking(guest_path, host_path, *overwrite)?
+        } else {
+            control.export_file_blocking(guest_path, host_path, *overwrite)?
+        })?),
     }
 }
 

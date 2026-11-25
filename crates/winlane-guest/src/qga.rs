@@ -107,7 +107,7 @@ impl QgaTransport for UnixQgaTransport {
 }
 
 pub struct QgaClient<T> {
-    transport: T,
+    pub(crate) transport: T,
 }
 
 impl<T: QgaTransport> QgaClient<T> {
@@ -204,7 +204,17 @@ impl<T: QgaTransport> QgaClient<T> {
         Ok(())
     }
 
+    pub fn file_flush(&mut self, handle: u64) -> QgaResult<()> {
+        self.execute("guest-file-flush", json!({ "handle": handle }))?;
+        Ok(())
+    }
+
     pub fn file_write(&mut self, handle: u64, bytes: &[u8]) -> QgaResult<()> {
+        self.file_write_chunks(handle, bytes)?;
+        self.file_flush(handle)
+    }
+
+    pub(crate) fn file_write_chunks(&mut self, handle: u64, bytes: &[u8]) -> QgaResult<()> {
         for chunk in bytes.chunks(FILE_CHUNK_BYTES) {
             self.execute(
                 "guest-file-write",
@@ -215,7 +225,6 @@ impl<T: QgaTransport> QgaClient<T> {
                 }),
             )?;
         }
-        self.execute("guest-file-flush", json!({ "handle": handle }))?;
         Ok(())
     }
 
@@ -370,6 +379,32 @@ mod tests {
         };
         let mut client = QgaClient::new(transport);
         assert!(matches!(client.ping(), Err(QgaError::Guest { .. })));
+    }
+
+    #[test]
+    fn file_write_chunks_at_one_mib_boundary() {
+        let transport = ScriptedTransport {
+            incoming: VecDeque::from([
+                br#"{"return":{}}"#.to_vec(),
+                br#"{"return":{}}"#.to_vec(),
+                br#"{"return":{}}"#.to_vec(),
+            ]),
+            written: vec![],
+        };
+        let mut client = QgaClient::new(transport);
+        let bytes = vec![7_u8; 1024 * 1024 + 1];
+        client.file_write(9, &bytes).unwrap();
+        let requests: Vec<Value> = client
+            .transport
+            .written
+            .iter()
+            .filter(|bytes| bytes.starts_with(b"{"))
+            .map(|bytes| serde_json::from_slice(bytes).unwrap())
+            .filter(|request: &Value| request["execute"] == "guest-file-write")
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["arguments"]["count"], 1024 * 1024);
+        assert_eq!(requests[1]["arguments"]["count"], 1);
     }
 
     #[test]
