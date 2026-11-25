@@ -923,6 +923,7 @@ dependencies = [
 name = "winlane-view"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "fast_image_resize",
  "png",
  "serde",
