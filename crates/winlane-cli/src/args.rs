@@ -6,8 +6,8 @@ use winlane_guest::uia::{UiaView, is_valid_runtime_id};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
-pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
 pub const MACHINE_LIST_USAGE: &str = "usage: winlane machine list --control-socket PATH";
@@ -31,6 +31,7 @@ pub struct ViewArgs {
     pub machine_json: Option<String>,
     pub machine_name: Option<String>,
     pub fps: u32,
+    pub zoom_percent: u16,
     pub cell_width_px: u16,
     pub cell_height_px: u16,
 }
@@ -220,6 +221,7 @@ fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
     let mut machine_json = None;
     let mut machine_name = None;
     let mut fps = 5_u32;
+    let mut zoom_percent = 100_u16;
     let mut cell_width_px = 8_u16;
     let mut cell_height_px = 16_u16;
     let mut index = 0;
@@ -241,6 +243,15 @@ fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
                     "fps",
                     1,
                     30,
+                    VIEW_USAGE,
+                )?;
+            }
+            "--zoom" => {
+                zoom_percent = parse_bounded(
+                    take_value(args, &mut index, VIEW_USAGE)?,
+                    "zoom",
+                    100,
+                    400,
                     VIEW_USAGE,
                 )?;
             }
@@ -276,6 +287,7 @@ fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
         machine_json,
         machine_name,
         fps,
+        zoom_percent,
         cell_width_px,
         cell_height_px,
     })
@@ -886,10 +898,42 @@ mod tests {
                 machine_json: Some("{}".to_string()),
                 machine_name: None,
                 fps: 5,
+                zoom_percent: 100,
                 cell_width_px: 8,
                 cell_height_px: 16,
             })
         );
+    }
+
+    #[test]
+    fn parses_view_zoom() {
+        let args = vec![
+            "view".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--zoom".to_string(),
+            "200".to_string(),
+        ];
+        let Command::View(view) = parse_args(&args).unwrap() else {
+            panic!("expected view command");
+        };
+        assert_eq!(view.zoom_percent, 200);
+    }
+
+    #[test]
+    fn rejects_view_zoom_below_100() {
+        let result = parse_args(&[
+            "view".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--zoom".to_string(),
+            "99".to_string(),
+        ]);
+        assert!(matches!(result, Err(CliError::Usage(_))));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod harness;
 pub mod input;
 pub mod render;
+pub mod viewport;
 
 pub use artifact::{frame_from_artifact, frame_from_ppm};
 pub use detect::{
@@ -25,6 +26,7 @@ pub use input::{
     MouseEventKind, PasteError, PastePolicy, ViewerInput, map_input, sanitize_paste,
 };
 pub use render::{RenderedOutput, render_frame, render_frame_with_fallback, write_frame};
+pub use viewport::{SourceRect, ZoomViewport};
 
 pub fn implementation_status() -> &'static str {
     "terminal-core"

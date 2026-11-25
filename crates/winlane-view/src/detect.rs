@@ -163,7 +163,7 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "ghostty" {
         return capabilities(
-            GraphicsProtocol::Kitty,
+            GraphicsProtocol::HalfBlock,
             DetectionSource::Ghostty,
             truecolor,
             tmux,
@@ -171,7 +171,7 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "wezterm" {
         return capabilities(
-            GraphicsProtocol::Kitty,
+            GraphicsProtocol::HalfBlock,
             DetectionSource::WezTerm,
             truecolor,
             tmux,
@@ -255,16 +255,17 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_uses_kitty_graphics() {
+    fn ghostty_conservatively_uses_half_block_until_validated() {
         let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "ghostty")]));
-        assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
+        assert_eq!(detected.protocol, GraphicsProtocol::HalfBlock);
         assert_eq!(detected.source, DetectionSource::Ghostty);
     }
 
     #[test]
-    fn iterm_is_detected_but_not_claimed_supported() {
+    fn iterm_conservatively_uses_unsupported_iterm_detection_until_validated() {
         let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "iTerm.app")]));
         assert_eq!(detected.protocol, GraphicsProtocol::ITerm2);
+        assert_eq!(detected.source, DetectionSource::ITerm2);
         assert!(!detected.renderer_is_supported());
     }
 
@@ -312,7 +313,7 @@ mod tests {
                 true,
             ),
             (
-                "iterm2 detected unsupported",
+                "iterm2 conservative unsupported detection",
                 vec![("TERM_PROGRAM", "iTerm.app")],
                 GraphicsProtocol::ITerm2,
                 DetectionSource::ITerm2,

@@ -162,6 +162,10 @@ impl ViewportState {
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> ViewResult<Option<Resize>> {
         let after = self.geometry.resized(cols, rows)?;
+        self.resize_geometry(after)
+    }
+
+    pub fn resize_geometry(&mut self, after: TerminalGeometry) -> ViewResult<Option<Resize>> {
         if after == self.geometry {
             return Ok(None);
         }
