@@ -114,22 +114,29 @@ machine=$(cargo run -p winlane-cli -- machine create \
 
 cargo run -p winlane-cli -- machine start \
   --control-socket /tmp/winlane-control.sock \
-  --machine-json "$machine"
+  --machine demo-1
 ```
 
-`machine create` prints one JSON object. The current alpha passes that object back to lifecycle, view, and guest commands. This is functional, but it is not the final CLI ergonomics.
+`machine create` prints one JSON object. Machine lifecycle and view commands accept either `--machine-json "$machine"` or `--machine NAME`. Name resolution asks the control daemon to list machines and fails if the name is absent or ambiguous. Guest commands still require `--machine-json` because they connect directly to the guest agent socket.
+
+List machines known under the daemon root. The output is one compact JSON array:
+
+```sh
+cargo run -p winlane-cli -- machine list \
+  --control-socket /tmp/winlane-control.sock
+```
 
 Clone a stopped machine or destroy it explicitly:
 
 ```sh
 clone=$(cargo run -p winlane-cli -- machine clone \
   --control-socket /tmp/winlane-control.sock \
-  --machine-json "$machine" \
+  --machine demo-1 \
   --name demo-1-copy)
 
 cargo run -p winlane-cli -- machine destroy \
   --control-socket /tmp/winlane-control.sock \
-  --machine-json "$clone"
+  --machine demo-1-copy
 ```
 
 ## Watch and control the display
@@ -137,7 +144,7 @@ cargo run -p winlane-cli -- machine destroy \
 ```sh
 cargo run -p winlane-cli -- view \
   --control-socket /tmp/winlane-control.sock \
-  --machine-json "$machine"
+  --machine demo-1
 ```
 
 Ctrl-Q detaches. Terminal paste is normalized and stripped of control bytes before being typed into the guest. Unsupported Unicode text is dropped by the hardware keyboard path rather than being turned into incorrect key events.
@@ -199,7 +206,7 @@ cargo run -p winlane-cli -- mcp \
   --evidence-dir /path/to/evidence
 ```
 
-The hardware-plane MCP tools cover machine creation, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
+The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
 
 Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node.
 

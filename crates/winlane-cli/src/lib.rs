@@ -55,7 +55,7 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
             writeln!(output, "{USAGE}")?;
             Ok(())
         }
-        Command::View(view) => run_live_view(LiveViewConfig::from_args(view)?).await,
+        Command::View(view) => run_live_view(LiveViewConfig::from_args(view).await?).await,
         Command::Daemon(daemon) => run_daemon(daemon).await,
         Command::Machine(machine) => {
             let stdout = std::io::stdout();

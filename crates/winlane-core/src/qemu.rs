@@ -147,6 +147,43 @@ impl QemuBackend {
         })))
     }
 
+    /// Return valid machine records directly under the backend root, sorted by name.
+    /// Malformed or unrelated entries are ignored so one stale artifact cannot hide machines.
+    pub async fn list_machines(&self) -> CoreResult<Vec<MachineHandle>> {
+        let mut entries = tokio::fs::read_dir(&self.root_dir)
+            .await
+            .map_err(CoreError::io("read machine root", &self.root_dir))?;
+        let mut machines = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(CoreError::io("iterate machine root", &self.root_dir))?
+        {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type().await else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let record_path = path.join(MACHINE_FILE);
+            let Ok(bytes) = tokio::fs::read(&record_path).await else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<MachineRecord>(&bytes) else {
+                continue;
+            };
+            if path.file_name().and_then(|name| name.to_str()) != Some(record.handle.name.as_str())
+                || Path::new(&record.handle.state_dir) != path
+            {
+                continue;
+            }
+            machines.push(record.handle);
+        }
+        machines.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        Ok(machines)
+    }
+
     pub async fn create_machine(&mut self, spec: &MachineSpec) -> CoreResult<MachineHandle> {
         spec.validate()?;
         if spec.arch != CpuArch::X86_64 {
@@ -1682,6 +1719,70 @@ mod tests {
     fn rejects_overlong_socket_paths() {
         let path = PathBuf::from("/").join("a".repeat(MAX_SOCKET_PATH_BYTES));
         assert!(validate_socket_path(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_machines_returns_valid_records_and_ignores_malformed_entries() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let backend = QemuBackend::new(root.path()).await.expect("create backend");
+        let state_dir = backend.root_dir().join("builder");
+        tokio::fs::create_dir(&state_dir)
+            .await
+            .expect("create state dir");
+        let handle = MachineHandle {
+            id: "machine-1".to_string(),
+            name: "builder".to_string(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            backend: "qemu".to_string(),
+            state: MachineState::Defined,
+        };
+        let record = MachineRecord {
+            handle: handle.clone(),
+            spec: MachineSpec {
+                name: "builder".to_string(),
+                arch: CpuArch::X86_64,
+                memory_mb: 4096,
+                cpus: 4,
+                disk_gb: 64,
+                iso_path: None,
+                base_image_path: None,
+                guest_agent: true,
+                network: NetworkMode::Isolated,
+                tpm: true,
+                boot: BootMode::Uefi,
+            },
+            disk_path: state_dir.join(DISK_FILE),
+            qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+            qga_socket_path: Some(state_dir.join(QGA_SOCKET_FILE)),
+            pid: None,
+            ovmf_vars_path: None,
+            tpm_state_dir: None,
+            pending_loadvm: None,
+            checkpoints: Vec::new(),
+        };
+        tokio::fs::write(
+            state_dir.join(MACHINE_FILE),
+            serde_json::to_vec(&record).expect("encode record"),
+        )
+        .await
+        .expect("write record");
+        tokio::fs::create_dir(backend.root_dir().join("bad"))
+            .await
+            .expect("create malformed dir");
+        tokio::fs::write(
+            backend.root_dir().join("bad").join(MACHINE_FILE),
+            b"not json",
+        )
+        .await
+        .expect("write malformed record");
+        tokio::fs::write(backend.root_dir().join("stray"), b"{}")
+            .await
+            .expect("write stray file");
+
+        assert_eq!(
+            backend.list_machines().await.expect("list machines"),
+            vec![handle]
+        );
     }
 
     #[test]

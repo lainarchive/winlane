@@ -5,14 +5,13 @@ use winlane_contracts::{BootMode, NetworkMode};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine start|stop|status --control-socket PATH --machine-json JSON\n       winlane machine clone --control-socket PATH --machine-json JSON --name NAME\n       winlane machine destroy --control-socket PATH --machine-json JSON\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
-pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH --machine-json JSON [--fps N] [--cell-width-px N] [--cell-height-px N]";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
+pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
-pub const MACHINE_ACTION_USAGE: &str =
-    "usage: winlane machine start|stop|status|destroy --control-socket PATH --machine-json JSON";
-pub const MACHINE_CLONE_USAGE: &str =
-    "usage: winlane machine clone --control-socket PATH --machine-json JSON --name NAME";
+pub const MACHINE_LIST_USAGE: &str = "usage: winlane machine list --control-socket PATH";
+pub const MACHINE_ACTION_USAGE: &str = "usage: winlane machine start|stop|status|destroy --control-socket PATH (--machine-json JSON | --machine NAME)";
+pub const MACHINE_CLONE_USAGE: &str = "usage: winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME";
 pub const MCP_USAGE: &str = "usage: winlane mcp --control-socket PATH [--evidence-dir PATH]";
 pub const EVIDENCE_EXPORT_USAGE: &str =
     "usage: winlane evidence export --evidence-dir PATH --output PATH";
@@ -32,7 +31,8 @@ pub const GUEST_EXPORT_USAGE: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewArgs {
     pub control_socket: PathBuf,
-    pub machine_json: String,
+    pub machine_json: Option<String>,
+    pub machine_name: Option<String>,
     pub fps: u32,
     pub cell_width_px: u16,
     pub cell_height_px: u16,
@@ -61,19 +61,27 @@ pub struct CreateArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineArgs {
     pub control_socket: PathBuf,
-    pub machine_json: String,
+    pub machine_json: Option<String>,
+    pub machine_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListArgs {
+    pub control_socket: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloneArgs {
     pub control_socket: PathBuf,
-    pub machine_json: String,
+    pub machine_json: Option<String>,
+    pub machine_name: Option<String>,
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineCommand {
     Create(CreateArgs),
+    List(ListArgs),
     Start(MachineArgs),
     Stop(MachineArgs),
     Status(MachineArgs),
@@ -201,6 +209,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
 fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
     let mut control_socket = None;
     let mut machine_json = None;
+    let mut machine_name = None;
     let mut fps = 5_u32;
     let mut cell_width_px = 8_u16;
     let mut cell_height_px = 16_u16;
@@ -213,6 +222,9 @@ fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
             }
             "--machine-json" => {
                 machine_json = Some(take_value(args, &mut index, VIEW_USAGE)?.to_string());
+            }
+            "--machine" => {
+                machine_name = Some(take_value(args, &mut index, VIEW_USAGE)?.to_string());
             }
             "--fps" => {
                 fps = parse_bounded(
@@ -249,9 +261,11 @@ fn parse_view_args(args: &[String]) -> Result<ViewArgs, CliError> {
         }
     }
 
+    validate_machine_reference(&machine_json, &machine_name, VIEW_USAGE)?;
     Ok(ViewArgs {
         control_socket: required(control_socket, "--control-socket", VIEW_USAGE)?,
-        machine_json: required(machine_json, "--machine-json", VIEW_USAGE)?,
+        machine_json,
+        machine_name,
         fps,
         cell_width_px,
         cell_height_px,
@@ -288,6 +302,7 @@ fn parse_machine_args(args: &[String]) -> Result<MachineCommand, CliError> {
     };
     match action.as_str() {
         "create" => parse_machine_create_args(&args[1..]).map(MachineCommand::Create),
+        "list" => parse_machine_list_args(&args[1..]).map(MachineCommand::List),
         "start" => parse_machine_action_args(&args[1..]).map(MachineCommand::Start),
         "stop" => parse_machine_action_args(&args[1..]).map(MachineCommand::Stop),
         "status" => parse_machine_action_args(&args[1..]).map(MachineCommand::Status),
@@ -391,9 +406,17 @@ fn parse_machine_create_args(args: &[String]) -> Result<CreateArgs, CliError> {
     })
 }
 
+fn parse_machine_list_args(args: &[String]) -> Result<ListArgs, CliError> {
+    let options = ParsedOptions::parse(args, MACHINE_LIST_USAGE, &["--control-socket"])?;
+    Ok(ListArgs {
+        control_socket: PathBuf::from(options.required("--control-socket", MACHINE_LIST_USAGE)?),
+    })
+}
+
 fn parse_machine_action_args(args: &[String]) -> Result<MachineArgs, CliError> {
     let mut control_socket = None;
     let mut machine_json = None;
+    let mut machine_name = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].clone();
@@ -409,6 +432,10 @@ fn parse_machine_action_args(args: &[String]) -> Result<MachineArgs, CliError> {
                 machine_json =
                     Some(take_value(args, &mut index, MACHINE_ACTION_USAGE)?.to_string());
             }
+            "--machine" => {
+                machine_name =
+                    Some(take_value(args, &mut index, MACHINE_ACTION_USAGE)?.to_string());
+            }
             _ => {
                 return Err(CliError::Usage(format!(
                     "unknown machine flag {flag}; {MACHINE_ACTION_USAGE}"
@@ -416,9 +443,11 @@ fn parse_machine_action_args(args: &[String]) -> Result<MachineArgs, CliError> {
             }
         }
     }
+    validate_machine_reference(&machine_json, &machine_name, MACHINE_ACTION_USAGE)?;
     Ok(MachineArgs {
         control_socket: required(control_socket, "--control-socket", MACHINE_ACTION_USAGE)?,
-        machine_json: required(machine_json, "--machine-json", MACHINE_ACTION_USAGE)?,
+        machine_json,
+        machine_name,
     })
 }
 
@@ -426,13 +455,19 @@ fn parse_machine_clone_args(args: &[String]) -> Result<CloneArgs, CliError> {
     let options = ParsedOptions::parse(
         args,
         MACHINE_CLONE_USAGE,
-        &["--control-socket", "--machine-json", "--name"],
+        &["--control-socket", "--machine-json", "--machine", "--name"],
     )?;
+    let machine_json = options
+        .one("--machine-json", MACHINE_CLONE_USAGE)?
+        .map(str::to_string);
+    let machine_name = options
+        .one("--machine", MACHINE_CLONE_USAGE)?
+        .map(str::to_string);
+    validate_machine_reference(&machine_json, &machine_name, MACHINE_CLONE_USAGE)?;
     Ok(CloneArgs {
         control_socket: PathBuf::from(options.required("--control-socket", MACHINE_CLONE_USAGE)?),
-        machine_json: options
-            .required("--machine-json", MACHINE_CLONE_USAGE)?
-            .to_string(),
+        machine_json,
+        machine_name,
         name: options.required("--name", MACHINE_CLONE_USAGE)?.to_string(),
     })
 }
@@ -689,6 +724,22 @@ fn take_value<'a>(args: &'a [String], index: &mut usize, usage: &str) -> Result<
     Ok(value)
 }
 
+fn validate_machine_reference(
+    machine_json: &Option<String>,
+    machine_name: &Option<String>,
+    usage: &str,
+) -> Result<(), CliError> {
+    match (machine_json, machine_name) {
+        (Some(_), None) | (None, Some(_)) => Ok(()),
+        (None, None) => Err(CliError::Usage(format!(
+            "one of --machine-json or --machine is required; {usage}"
+        ))),
+        (Some(_), Some(_)) => Err(CliError::Usage(format!(
+            "--machine-json and --machine are mutually exclusive; {usage}"
+        ))),
+    }
+}
+
 fn required<T>(value: Option<T>, flag: &str, usage: &str) -> Result<T, CliError> {
     value.ok_or_else(|| CliError::Usage(format!("missing {flag}; {usage}")))
 }
@@ -738,7 +789,8 @@ mod tests {
             parse_args(&args).unwrap(),
             Command::View(ViewArgs {
                 control_socket: PathBuf::from("/tmp/control.sock"),
-                machine_json: "{}".to_string(),
+                machine_json: Some("{}".to_string()),
+                machine_name: None,
                 fps: 5,
                 cell_width_px: 8,
                 cell_height_px: 16,
@@ -842,7 +894,8 @@ mod tests {
             let parsed = parse_args(&args).unwrap();
             let expected = MachineArgs {
                 control_socket: PathBuf::from("/tmp/control.sock"),
-                machine_json: "{}".to_string(),
+                machine_json: Some("{}".to_string()),
+                machine_name: None,
             };
             match action {
                 "start" => assert_eq!(parsed, Command::Machine(MachineCommand::Start(expected))),
@@ -1056,7 +1109,8 @@ mod tests {
             parse_args(&machine).unwrap(),
             Command::Machine(MachineCommand::Clone(CloneArgs {
                 control_socket: PathBuf::from("/tmp/control.sock"),
-                machine_json: "{}".to_string(),
+                machine_json: Some("{}".to_string()),
+                machine_name: None,
                 name: "copy-1".to_string(),
             }))
         );
@@ -1116,5 +1170,55 @@ mod tests {
             ]);
             assert!(matches!(result, Err(CliError::Usage(_))));
         }
+    }
+    #[test]
+    fn parses_machine_list_and_machine_name_reference() {
+        assert_eq!(
+            parse_args(&[
+                "machine".to_string(),
+                "list".to_string(),
+                "--control-socket".to_string(),
+                "/tmp/control.sock".to_string(),
+            ])
+            .unwrap(),
+            Command::Machine(MachineCommand::List(crate::args::ListArgs {
+                control_socket: PathBuf::from("/tmp/control.sock"),
+            }))
+        );
+        let parsed = parse_args(&[
+            "machine".to_string(),
+            "status".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+        ])
+        .unwrap();
+        match parsed {
+            Command::Machine(MachineCommand::Status(args)) => {
+                assert_eq!(args.machine_name.as_deref(), Some("builder"));
+                assert_eq!(args.machine_json, None);
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_reference_requires_exactly_one_form() {
+        let base = [
+            "machine".to_string(),
+            "status".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+        ];
+        assert!(parse_args(&base).is_err());
+        let mut both = base.to_vec();
+        both.extend([
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+        ]);
+        assert!(parse_args(&both).is_err());
     }
 }
