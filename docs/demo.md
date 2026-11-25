@@ -1,16 +1,20 @@
 # Demo recording
 
-`scripts/demo/record.sh` records a real terminal demo with tmux and asciinema. It uses the built `winlane` binary, a provisioned Windows golden qcow2 image, the control daemon, `winlane view`, CLI guest operations, and MCP semantic/checkpoint tools. It does not fabricate frames or write committed demo artifacts.
+`scripts/demo/record-x11.sh` is the high-resolution demo recorder. It records the actual pixels shown by a modern kitty terminal: one kitty split runs `winlane view` directly without tmux, and the other split runs the real CLI/MCP driver. ffmpeg captures the bare Xvfb display with `x11grab`; asciinema/term-stream terminal rasterization is not used for this artifact.
+
+The older `scripts/demo/record.sh` tmux/asciinema harness is retained only as a legacy/fallback terminal transcript. Because released tmux does not reliably manage Kitty image placements per pane, that harness shows the explicitly labeled half-block preview and is not representative of high-resolution winlane rendering.
 
 ## Prerequisites
 
-Build the CLI first:
+Build the release CLI first:
 
 ```sh
 cargo build --release -p winlane-cli
 ```
 
-Install tmux and asciinema with the host package manager. `agg` and ffmpeg are optional: if both exist, the script also writes a gif and mp4.
+Required host tools: Xvfb, ffmpeg/ffprobe, python3, `xwininfo`, and `xdpyinfo`. The harness does not install QEMU, Windows, drivers, X11 tools, or ffmpeg; kitty is downloaded into the user cache rather than system-installed.
+
+A modern kitty binary is required. By default the recorder downloads the official portable Linux kitty 0.51.1 release into the user cache outside the repository and verifies its pinned SHA-256 before use. To use an existing modern kitty instead, pass `--kitty-bin /path/to/kitty` or set `WINLANE_KITTY_BIN=/path/to/kitty`. Do not put the binary in the repository.
 
 Required inputs:
 
@@ -23,7 +27,7 @@ Required inputs:
 ## Record
 
 ```sh
-scripts/demo/record.sh \
+scripts/demo/record-x11.sh \
   --golden-image /path/to/winlane-state/win11-alpha/golden.qcow2 \
   --runtime-root /path/to/winlane-runtime \
   --control-socket /tmp/winlane-demo-control.sock \
@@ -31,36 +35,46 @@ scripts/demo/record.sh \
   --output-dir /path/to/demo-output
 ```
 
-Optional machine name, limited to letters, digits, underscore, and dash:
+Optional arguments:
 
 ```sh
   --machine-name winlane-demo-1
+  --kitty-bin /path/to/kitty
+  --winlane-bin /path/to/winlane
 ```
+
+`--driver-script` exists as a validation hook for mechanical harness tests; normal demo runs should omit it.
 
 ## What is recorded
 
-The recording attaches to one tmux session with two panes:
+Xvfb creates a bare 1920x1080 display. One kitty OS window fills that display, so there is no VM window chrome or desktop noise to crop. Kitty's native splits provide two readable terminal panes:
 
-- left: `winlane view`, showing the real Windows desktop once the machine starts
+- left: a view supervisor running `winlane view` directly in kitty
 - right: the real CLI/MCP control sequence
+
+The driver signals the supervisor through a small state file. The supervisor starts or restarts `winlane view` after the initial machine start and after the stop/restore/start sequence. `winlane view` is not inside tmux, so terminal detection can use the Kitty graphics path.
 
 The sequence creates and starts a disposable machine, launches Notepad in the interactive session, writes `before checkpoint` through MCP `ui_set_text`, creates an MCP checkpoint, writes `this never happened`, then stops/restores/starts because the current backend requires that sequence. After restore, the harness reads a fresh UI Automation node, runs a guest-side PowerShell reader in the interactive session, exports its JSON result, and requires the Notepad document text from `ValuePattern` or `TextPattern` to be exactly `before checkpoint`. Any mismatch or missing read result fails the demo. It then stops and destroys the machine. Evidence is exported under the output directory.
 
 Outputs:
 
-- `winlane-demo.cast`
-- `winlane-demo.gif` only when `agg` is installed
-- `winlane-demo.mp4` only when `agg` and ffmpeg are installed
+- `winlane-demo-x11.mp4` — real-time 1920x1080 H.264 x11grab capture; no time compression, speedup, or fabricated terminal output
+- `capture-info.json` — MP4 dimensions/duration/codec/SHA-256, kitty version/path, display number, crop/time-compression declarations, and driver exit status
+- `driver.log` and `driver-status` — real driver output and exit status
+- `ffmpeg.log`, `kitty.log`, `xvfb.log`, and `daemon.log`
 - `evidence-export/`
 
-The cast is recorded with asciinema `--idle-time-limit 2`; long idle waits are compressed, but terminal output is not fabricated or edited.
+The MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden.
 
 ## Caveats
 
-- Because the view runs inside tmux, the conservative half-block preview renderer is used even when the outer terminal supports Kitty graphics. Released tmux does not reliably manage Kitty placements per pane; pane-aware support exists only in unreleased tmux master/next-3.9 work. The fallback reserves one row for a `HALF-BLOCK PREVIEW` label when space permits.
 - The golden image must already provision Windows, virtio drivers, QEMU Guest Agent, and the interactive user session used by winlane.
 - Notepad and the post-restore text reader run through temporary Scheduled Tasks using the portable `<GroupId>S-1-5-4</GroupId>` principal. If no interactive session exists, the demo correctly fails.
 - UI Automation paths are read fresh immediately before each write and before the post-restore text read. Runtime-id checks are used for semantic writes; the independent post-restore reader verifies the freshly resolved text node content exactly.
-- Running checkpoints can be large and slow; checkpoint timeout is 300 seconds in each direction.
-- The harness does not install tmux, asciinema, agg, ffmpeg, QEMU, Windows, or driver dependencies.
-- Temporary driver files are removed. The daemon, tmux session, machine, and recording processes are cleaned up on normal failure or interruption; a hard host crash can still leave machine state under the runtime root.
+- Running checkpoints can be large and slow; checkpoint timeout is 300 seconds in each direction. Real-time recording means long operations produce a long MP4.
+- The fixed 1920x1080 layout is intended to make the left Windows view approximately native size for a 1024x768 guest while retaining a readable driver pane. It is still a terminal demo, not a Windows compositor.
+- Temporary driver files are removed. The daemon, Xvfb display, kitty process, ffmpeg process, machine, and view supervisor are cleaned up on normal failure or interruption; a hard host crash can still leave machine state under the runtime root.
+
+## Legacy tmux/asciinema recording
+
+`scripts/demo/record.sh` remains useful when only a terminal transcript is needed or when ffmpeg/X11 cannot run. Its outputs (`winlane-demo.cast` and optional gif/mp4 conversions) use conservative half-block rendering and asciinema idle-time compression. Do not publish it as evidence of Kitty high-resolution rendering.

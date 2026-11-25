@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: drive-demo.sh --winlane-bin PATH --demo-dir PATH --control-socket PATH --machine-name NAME --golden-image PATH --evidence-dir PATH --output-dir PATH --work-dir PATH --view-pane PANE
+usage: drive-demo.sh --winlane-bin PATH --demo-dir PATH --control-socket PATH --machine-name NAME --golden-image PATH --evidence-dir PATH --output-dir PATH --work-dir PATH [--view-pane PANE | --view-state PATH] [--ready-file PATH]
 USAGE
 }
 
@@ -16,6 +16,8 @@ evidence_dir=""
 output_dir=""
 work_dir=""
 view_pane=""
+view_state=""
+ready_file=""
 
 while (($#)); do
   if [[ $# -lt 2 ]]; then
@@ -33,17 +35,29 @@ while (($#)); do
     --output-dir) output_dir=$2; shift 2 ;;
     --work-dir) work_dir=$2; shift 2 ;;
     --view-pane) view_pane=$2; shift 2 ;;
+    --view-state) view_state=$2; shift 2 ;;
+    --ready-file) ready_file=$2; shift 2 ;;
     *) echo "unknown driver argument: $1" >&2; usage; exit 2 ;;
   esac
 done
 
-for value_name in winlane_bin demo_dir control_socket machine_name golden_image evidence_dir output_dir work_dir view_pane; do
+for value_name in winlane_bin demo_dir control_socket machine_name golden_image evidence_dir output_dir work_dir; do
   if [[ -z ${!value_name} ]]; then
     echo "drive-demo error: missing --${value_name//_/-}" >&2
     usage
     exit 2
   fi
 done
+if [[ -z $view_pane && -z $view_state ]]; then
+  echo "drive-demo error: one of --view-pane or --view-state is required" >&2
+  usage
+  exit 2
+fi
+if [[ -n $view_pane && -n $view_state ]]; then
+  echo "drive-demo error: --view-pane and --view-state are mutually exclusive" >&2
+  usage
+  exit 2
+fi
 if [[ ! -x $winlane_bin ]]; then
   echo "drive-demo error: winlane binary is not executable: $winlane_bin" >&2
   exit 2
@@ -59,17 +73,29 @@ fi
 
 finish() {
   status=$?
+  stop_view >/dev/null 2>&1 || true
   printf '%s\n' "$status" >"$work_dir/driver-status" 2>/dev/null || true
-  printf '\n[demo] driver exiting with status %s; detaching recording client\n' "$status"
-  sleep 0.2
-  tmux detach-client >/dev/null 2>&1 || true
+  if [[ -n $view_pane ]]; then
+    printf '\n[demo] driver exiting with status %s; detaching recording client\n' "$status"
+    sleep 0.2
+    tmux detach-client >/dev/null 2>&1 || true
+  else
+    printf '\n[demo] driver exiting with status %s\n' "$status"
+    sleep 0.2
+  fi
 }
 trap finish EXIT
 trap 'printf "\ndrive-demo error: command failed at line %s\n" "$LINENO" >&2' ERR
 
-while [[ $(tmux display-message -p '#{session_attached}' 2>/dev/null || echo 0) == "0" ]]; do
-  sleep 0.1
-done
+if [[ -n $ready_file ]]; then
+  while [[ ! -e $ready_file ]]; do
+    sleep 0.1
+  done
+elif [[ -n $view_pane ]]; then
+  while [[ $(tmux display-message -p '#{session_attached}' 2>/dev/null || echo 0) == "0" ]]; do
+    sleep 0.1
+  done
+fi
 sleep 0.3
 
 run() {
@@ -86,12 +112,47 @@ run_capture() {
   "$@"
 }
 
+atomic_write() {
+  local path=$1 value=$2
+  printf '%s
+' "$value" >"${path}.tmp"
+  mv -f -- "${path}.tmp" "$path"
+}
+
 start_view() {
+  if [[ -n $view_state ]]; then
+    local next_request=1
+    local counter_file="${view_state}.counter"
+    if [[ -f $counter_file ]]; then
+      local current_request
+      current_request=$(cat "$counter_file" 2>/dev/null || echo 0)
+      if [[ $current_request =~ ^[0-9]+$ ]]; then
+        next_request=$((current_request + 1))
+      fi
+    fi
+    atomic_write "$counter_file" "$next_request"
+    atomic_write "$view_state" "$next_request"
+    printf 'requested external winlane view restart (request %s)\n' "$next_request"
+    return 0
+  fi
   local view_command
   printf -v view_command '%q ' "$winlane_bin" view \
     --control-socket "$control_socket" \
     --machine "$machine_name"
   run tmux respawn-pane -k -t "$view_pane" "$view_command"
+}
+
+stop_view() {
+  if [[ -n $view_state ]]; then
+    rm -f -- "${view_state}.stopped"
+    atomic_write "$view_state" 0
+    for _ in {1..100}; do
+      [[ -f ${view_state}.stopped ]] && return 0
+      sleep 0.1
+    done
+    echo "drive-demo error: timed out waiting for winlane view to stop" >&2
+    return 1
+  fi
 }
 
 mcp_call() {
@@ -231,6 +292,7 @@ write_notepad_text 'this never happened' "$work_dir/ui-tree-after-checkpoint.jso
 run sleep 3
 
 printf '\nrestoring the checkpoint requires the current backend stop/restore/start sequence\n'
+stop_view
 run "$winlane_bin" machine stop \
   --control-socket "$control_socket" \
   --machine "$machine_name"
@@ -313,6 +375,7 @@ run python3 "$demo_dir/verify_uia_text.py" "$work_dir/uia-read.json" 'before che
 printf 'restored Notepad text is independently verified; leaving the view visible\n'
 run sleep 7
 
+stop_view
 run "$winlane_bin" machine stop \
   --control-socket "$control_socket" \
   --machine "$machine_name"
