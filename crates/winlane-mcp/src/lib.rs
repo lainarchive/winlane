@@ -80,6 +80,10 @@ impl McpControlPlane {
                 let machine = self.machine_input(input).await?;
                 self.machine_wait(machine, input).await
             }
+            "machine_logs" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_logs(machine, input).await
+            }
             "screenshot" => {
                 let machine = self.machine_input(input).await?;
                 self.screenshot(machine).await
@@ -245,6 +249,14 @@ impl McpControlPlane {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    pub async fn machine_logs(&self, machine: MachineHandle, input: &Value) -> McpResult<Value> {
+        let lines = optional_bounded_u64(input, "lines", 50, 1, 1000)? as usize;
+        Ok(self
+            .client
+            .invoke(&ControlRequest::MachineLogs { machine, lines })
+            .await?)
     }
 
     pub async fn screenshot(&self, machine: MachineHandle) -> McpResult<Value> {
@@ -667,6 +679,14 @@ pub fn tool_definitions() -> Value {
             },
             "required": ["machine", "for"]
         }},
+        {"name": "machine_logs", "description": "Read bounded QEMU and swtpm log tails", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "lines": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 50}
+            },
+            "required": ["machine"]
+        }},
         {"name": "screenshot", "description": "Capture a full-resolution frame", "inputSchema": machine_only},
         {"name": "click", "description": "Click guest pixel coordinates", "inputSchema": {
             "type": "object",
@@ -987,6 +1007,7 @@ mod tests {
                 "machine_start",
                 "machine_stop",
                 "machine_wait",
+                "machine_logs",
                 "screenshot",
                 "click",
                 "move",
@@ -1023,6 +1044,24 @@ mod tests {
             wait.pointer("/inputSchema/properties/timeout_seconds/maximum"),
             Some(&json!(600))
         );
+        let logs = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("machine_logs"))
+            .expect("machine_logs schema");
+        assert_eq!(
+            logs.pointer("/inputSchema/properties/lines/minimum"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            logs.pointer("/inputSchema/properties/lines/maximum"),
+            Some(&json!(1000))
+        );
+        assert_eq!(
+            logs.pointer("/inputSchema/properties/lines/default"),
+            Some(&json!(50))
+        );
     }
 
     #[tokio::test]
@@ -1042,6 +1081,13 @@ mod tests {
             )
             .await;
         assert!(matches!(bad_timeout, Err(McpError::InvalidInput(_))));
+        let bad_lines = mcp
+            .dispatch(
+                "machine_logs",
+                &json!({"machine": machine_json(), "lines": 0}),
+            )
+            .await;
+        assert!(matches!(bad_lines, Err(McpError::InvalidInput(_))));
     }
 
     #[test]

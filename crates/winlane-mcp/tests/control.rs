@@ -250,6 +250,45 @@ async fn machine_wait_uses_guest_agent_ready_ipc_and_returns_ready_json() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_logs_uses_machine_logs_ipc_and_returns_structured_json() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind control socket");
+    let machine = referenced_machine();
+    let expected = machine.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept logs client");
+        let request = write_control_response(
+            stream,
+            json!({"qemu_log":{"present":true,"lines":["boot"],"truncated":false},"swtpm_log":{"present":false,"lines":[],"truncated":false}}),
+        )
+        .await;
+        assert_eq!(
+            request,
+            ControlRequest::MachineLogs {
+                machine: expected,
+                lines: 25
+            }
+        );
+    });
+
+    let mcp = McpControlPlane::new(&socket_path);
+    let result = mcp
+        .dispatch(
+            "machine_logs",
+            &json!({
+                "machine": serde_json::to_value(machine).expect("encode machine"),
+                "lines": 25,
+            }),
+        )
+        .await
+        .expect("machine logs");
+    assert_eq!(result["qemu_log"]["present"], true);
+    assert_eq!(result["qemu_log"]["lines"][0], "boot");
+    server.await.expect("server task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn machine_wait_timeout_returns_ready_false_json() {
     let root = tempfile::tempdir().expect("temporary directory");
     let socket_path = root.path().join("control.sock");
