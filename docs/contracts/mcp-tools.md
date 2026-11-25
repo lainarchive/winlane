@@ -32,6 +32,7 @@ Rules:
 - Hardware-plane input remains available when the semantic plane is unavailable.
 - Semantic element references expire when the UI tree generation changes.
 - `ui_tree` output states the UI Automation `view` used. Callers must pass the same `view` value to `ui_invoke` or `ui_set_text` for paths derived from that tree; mixing control-view and raw-view paths can target the wrong node or fail.
+- `runtime_id` is optional on `ui_invoke` and `ui_set_text`. When supplied, the helper resolves the path with the selected view, compares the resolved element runtime id, and fails if it differs or cannot be read. Path-only calls are accepted for compatibility but are not identity-checked; callers should pass `runtimeId` from the same fresh tree/view.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.
 - Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string. Name strings resolve through `machine_list`; absent or ambiguous names are invalid.

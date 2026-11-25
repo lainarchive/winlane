@@ -45,6 +45,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Mode,
     [string]$Path = "",
     [string]$TextBase64 = "",
+    [string]$RuntimeId = "",
     [string]$OutputPath = "",
     [int]$MaxDepth = 8,
     [int]$MaxNodes = 2000,
@@ -157,8 +158,18 @@ if ($Mode -eq "tree") {
     exit 0
 }
 
+function Assert-RuntimeId($element) {
+    if (-not $RuntimeId) { return }
+    if ($RuntimeId -notmatch '^-?[0-9]+(\.-?[0-9]+)*$') { throw "invalid runtime id" }
+    $actual = ""
+    try { $actual = ($element.GetRuntimeId() -join ".") } catch { $actual = "" }
+    if (-not $actual) { throw "element runtime id unavailable for comparison" }
+    if ($actual -ne $RuntimeId) { throw "element runtime id changed" }
+}
+
 if ($Mode -eq "invoke") {
     $element = Find-ElementByPath $Path
+    Assert-RuntimeId $element
     $invoke = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     if ($null -ne $invoke) {
         $invoke.Invoke()
@@ -182,6 +193,7 @@ if ($Mode -eq "invoke") {
 
 if ($Mode -eq "settext") {
     $element = Find-ElementByPath $Path
+    Assert-RuntimeId $element
     $value = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     if ($null -eq $value) { throw "element has no value pattern" }
     $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($TextBase64))
@@ -235,6 +247,14 @@ pub struct BlockingUiaControl<T> {
     client: QgaClient<T>,
     generation: u64,
     helper_path: String,
+}
+
+pub fn is_valid_runtime_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|part| {
+            let digits = part.strip_prefix('-').unwrap_or(part);
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 impl<T: QgaTransport> BlockingUiaControl<T> {
@@ -349,18 +369,22 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
     pub fn invoke(&mut self, target: &UiNodeRef, view: UiaView) -> UiaResult<Value> {
         validate_element_path(&target.id)?;
         self.install_helper()?;
-        self.run_powershell(
-            &[
-                "-Mode".to_owned(),
-                "invoke".to_owned(),
-                "-Path".to_owned(),
-                target.id.clone(),
-                "-View".to_owned(),
-                view.as_str().to_owned(),
-            ],
-            15_000,
-        )
-        .and_then(|capture| parse_helper_json(&capture.stdout))
+        let mut args = vec![
+            "-Mode".to_owned(),
+            "invoke".to_owned(),
+            "-Path".to_owned(),
+            target.id.clone(),
+            "-View".to_owned(),
+            view.as_str().to_owned(),
+        ];
+        if let Some(runtime_id) = &target.runtime_id {
+            if !is_valid_runtime_id(runtime_id) {
+                return Err(UiaError::InvalidElementRef);
+            }
+            args.extend(["-RuntimeId".to_owned(), runtime_id.clone()]);
+        }
+        self.run_powershell(&args, 15_000)
+            .and_then(|capture| parse_helper_json(&capture.stdout))
     }
 
     pub fn set_text(&mut self, target: &UiNodeRef, text: &str, view: UiaView) -> UiaResult<Value> {
@@ -370,20 +394,24 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
             return Err(UiaError::InputTooLarge(MAX_TEXT_BYTES));
         }
         self.install_helper()?;
-        self.run_powershell(
-            &[
-                "-Mode".to_owned(),
-                "settext".to_owned(),
-                "-Path".to_owned(),
-                target.id.clone(),
-                "-TextBase64".to_owned(),
-                STANDARD.encode(text.as_bytes()),
-                "-View".to_owned(),
-                view.as_str().to_owned(),
-            ],
-            15_000,
-        )
-        .and_then(|capture| parse_helper_json(&capture.stdout))
+        let mut args = vec![
+            "-Mode".to_owned(),
+            "settext".to_owned(),
+            "-Path".to_owned(),
+            target.id.clone(),
+            "-TextBase64".to_owned(),
+            STANDARD.encode(text.as_bytes()),
+            "-View".to_owned(),
+            view.as_str().to_owned(),
+        ];
+        if let Some(runtime_id) = &target.runtime_id {
+            if !is_valid_runtime_id(runtime_id) {
+                return Err(UiaError::InvalidElementRef);
+            }
+            args.extend(["-RuntimeId".to_owned(), runtime_id.clone()]);
+        }
+        self.run_powershell(&args, 15_000)
+            .and_then(|capture| parse_helper_json(&capture.stdout))
     }
 
     fn run_powershell(&mut self, args: &[String], timeout_ms: u64) -> UiaResult<ProcessCapture> {
@@ -740,6 +768,18 @@ mod tests {
         assert!(UIA_HELPER_SCRIPT.contains("RawViewWalker"));
         assert!(UIA_HELPER_SCRIPT.contains(r#"[ValidateSet("control","raw")]"#));
         assert!(UIA_HELPER_SCRIPT.contains("view = $View"));
+        assert!(UIA_HELPER_SCRIPT.contains("Assert-RuntimeId"));
+        assert!(UIA_HELPER_SCRIPT.contains("element runtime id changed"));
+        assert!(UIA_HELPER_SCRIPT.contains("element runtime id unavailable for comparison"));
+    }
+
+    #[test]
+    fn validates_runtime_id_shape() {
+        assert!(is_valid_runtime_id("7.42.-3"));
+        assert!(!is_valid_runtime_id(""));
+        assert!(!is_valid_runtime_id("7..42"));
+        assert!(!is_valid_runtime_id("7/42"));
+        assert!(!is_valid_runtime_id("7.42;calc"));
     }
 
     #[test]

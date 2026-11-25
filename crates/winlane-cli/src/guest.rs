@@ -44,11 +44,13 @@ enum GuestOperation {
     Invoke {
         node: String,
         view: UiaView,
+        runtime_id: Option<String>,
     },
     SetText {
         node: String,
         text: String,
         view: UiaView,
+        runtime_id: Option<String>,
     },
     Run {
         command: String,
@@ -75,6 +77,7 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
         GuestCommand::Invoke(args) => Ok(GuestOperation::Invoke {
             node: args.node.clone(),
             view: args.view,
+            runtime_id: args.runtime_id.clone(),
         }),
         GuestCommand::SetText(args) => {
             if args
@@ -90,6 +93,7 @@ fn guest_operation(command: &GuestCommand) -> CliResult<GuestOperation> {
                 node: args.node.clone(),
                 text: args.text.clone(),
                 view: args.view,
+                runtime_id: args.runtime_id.clone(),
             })
         }
         GuestCommand::Run(args) => Ok(GuestOperation::Run {
@@ -126,10 +130,17 @@ fn execute_operation<T: QgaTransport>(
             max_nodes,
             view,
         } => Ok(control.ui_tree(*max_depth, *max_nodes, *view)?),
-        GuestOperation::Invoke { node, view } => Ok(control.invoke(&node_ref(node), *view)?),
-        GuestOperation::SetText { node, text, view } => {
-            Ok(control.set_text(&node_ref(node), text, *view)?)
-        }
+        GuestOperation::Invoke {
+            node,
+            view,
+            runtime_id,
+        } => Ok(control.invoke(&node_ref(node, runtime_id.clone()), *view)?),
+        GuestOperation::SetText {
+            node,
+            text,
+            view,
+            runtime_id,
+        } => Ok(control.set_text(&node_ref(node, runtime_id.clone()), text, *view)?),
         GuestOperation::Run {
             command,
             args,
@@ -157,10 +168,11 @@ fn execute_operation<T: QgaTransport>(
     }
 }
 
-fn node_ref(path: &str) -> UiNodeRef {
+fn node_ref(path: &str, runtime_id: Option<String>) -> UiNodeRef {
     UiNodeRef {
         id: path.to_string(),
         generation: 0,
+        runtime_id,
         automation_id: None,
         control_type: None,
         bounds: None,
@@ -381,6 +393,7 @@ mod tests {
             &GuestOperation::Invoke {
                 node: "0/1/2".to_string(),
                 view: UiaView::Raw,
+                runtime_id: Some("7.42".to_string()),
             },
         )
         .unwrap();
@@ -389,7 +402,7 @@ mod tests {
             "
 ",
         );
-        assert!(xml.contains("-Mode invoke -Path 0/1/2 -View raw -OutputPath"));
+        assert!(xml.contains("-Mode invoke -Path 0/1/2 -View raw -RuntimeId 7.42 -OutputPath"));
     }
 
     #[test]
@@ -402,6 +415,7 @@ mod tests {
                 node: "0/1/2".to_string(),
                 text: String::new(),
                 view: UiaView::Control,
+                runtime_id: None,
             },
         )
         .unwrap();

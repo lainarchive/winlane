@@ -124,6 +124,10 @@
             "raw"
           ],
           "default": "control"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"
         }
       },
       "required": [
@@ -191,6 +195,10 @@
             "raw"
           ],
           "default": "control"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"
         }
       },
       "required": [
