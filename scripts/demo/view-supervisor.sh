@@ -84,9 +84,12 @@ while [[ ! -e $stop_file ]]; do
   if [[ $desired_request != "$current_request" ]]; then
     if [[ -z $desired_request || $desired_request == 0 ]]; then
       if child_running; then
-        printf 'stop requested; waiting for winlane view to exit cleanly\n'
+        printf 'stop requested; stopping winlane view\n'
       fi
+      stop_child
       current_request=0
+      printf '0\n' >"${state_file}.stopped.tmp"
+      mv -f -- "${state_file}.stopped.tmp" "${state_file}.stopped"
     else
       stop_child
       current_request=$desired_request

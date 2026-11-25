@@ -112,6 +112,13 @@ run_capture() {
   "$@"
 }
 
+atomic_write() {
+  local path=$1 value=$2
+  printf '%s
+' "$value" >"${path}.tmp"
+  mv -f -- "${path}.tmp" "$path"
+}
+
 start_view() {
   if [[ -n $view_state ]]; then
     local next_request=1
@@ -137,7 +144,14 @@ start_view() {
 
 stop_view() {
   if [[ -n $view_state ]]; then
-    printf '0\n' >"$view_state"
+    rm -f -- "${view_state}.stopped"
+    atomic_write "$view_state" 0
+    for _ in {1..100}; do
+      [[ -f ${view_state}.stopped ]] && return 0
+      sleep 0.1
+    done
+    echo "drive-demo error: timed out waiting for winlane view to stop" >&2
+    return 1
   fi
 }
 

@@ -40,9 +40,12 @@ ensure_portable_kitty() {
   local url="https://github.com/kovidgoyal/kitty/releases/download/v${version}/kitty-${version}-x86_64.txz"
   local cache_parent="${XDG_CACHE_HOME:-$HOME/.cache}/winlane-demo"
   local target="$cache_parent/kitty-$version"
-  if [[ -x $target/bin/kitty ]]; then
-    printf '%s\n' "$target/bin/kitty"
-    return 0
+  if [[ -x $target/bin/kitty && -f $target/kitty.txz ]]; then
+    if (cd "$target" && printf '%s  kitty.txz\n' "$sha256" | sha256sum -c - >/dev/null 2>&1); then
+      printf '%s\n' "$target/bin/kitty"
+      return 0
+    fi
+    rm -rf -- "$target"
   fi
   command -v curl >/dev/null 2>&1 || fail "curl is required to download kitty"
   command -v xz >/dev/null 2>&1 || fail "xz is required to unpack kitty"
@@ -56,8 +59,11 @@ ensure_portable_kitty() {
     mkdir extract
     tar -xJf kitty.txz -C extract
     mkdir -p -- "$cache_parent"
+    rm -rf -- "$target.new"
+    mv extract "$target.new"
+    mv kitty.txz "$target.new/kitty.txz"
     rm -rf -- "$target"
-    mv extract "$target"
+    mv "$target.new" "$target"
   ) || rc=$?
   rm -rf -- "$tmp"
   if [[ $rc -ne 0 || ! -x $target/bin/kitty ]]; then
