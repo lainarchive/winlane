@@ -14,10 +14,10 @@ A claim belongs in this tier only after three clean end-to-end runs.
 
 - Windows x86_64 host with WHPX
 - macOS Apple silicon host with Windows 11 ARM64
-- Ghostty, WezTerm, iTerm2, sixel, and unreleased-tmux Kitty rendering variants
+- independent validation of terminal graphics beyond the supported Kitty path
 - higher-rate guest-side capture
 
-Experimental means the code exists and has run once. It does not mean the path is supportable.
+Experimental means the code exists and has run once. It does not mean the path is supportable. Ghostty, WezTerm, iTerm2, sixel, and tmux are not experimental rendering variants at runtime: they conservatively use the supported half-block preview fallback until independently validated. Released tmux does not reliably manage Kitty image placements per pane; iTerm2 Kitty graphics is accepted only for numeric versions at least 3.5.4, with unknown or older versions falling back.
 
 ## Out of scope for the first release
 
