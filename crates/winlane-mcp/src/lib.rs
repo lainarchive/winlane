@@ -485,6 +485,7 @@ impl McpControlPlane {
         machine: MachineHandle,
         operation: SemanticOperation,
     ) -> McpResult<Value> {
+        self.machine_status(machine.clone()).await?;
         let _semantic_guard = self.semantic_lock.lock().await;
         tokio::task::spawn_blocking(move || {
             let qga_socket = PathBuf::from(machine.state_dir).join("qga.sock");
@@ -612,7 +613,7 @@ pub fn tool_definitions() -> Value {
                     "name": {"type": "string"},
                     "state_dir": {"type": "string"},
                     "backend": {"type": "string"},
-                    "state": {"type": "string"}
+                    "state": {"type": "string", "enum": ["defined", "provisioning", "stopped", "running", "paused", "failed"]}
                 },
                 "required": ["id", "name", "state_dir", "backend", "state"]
             },
@@ -641,7 +642,7 @@ pub fn tool_definitions() -> Value {
         {"name": "machine_create", "description": "Create a disposable machine from a golden image or installer ISO", "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "minLength": 1, "maxLength": 48},
+                "name": {"type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[A-Za-z0-9_-]+$"},
                 "base_image_path": {"type": "string"},
                 "iso_path": {"type": "string"},
                 "memory_mb": {"type": "integer", "minimum": 512, "maximum": 1048576, "default": 4096},
@@ -662,7 +663,7 @@ pub fn tool_definitions() -> Value {
             "type": "object",
             "properties": {
                 "machine": machine_ref,
-                "name": {"type": "string", "minLength": 1, "maxLength": 48}
+                "name": {"type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[A-Za-z0-9_-]+$"}
             },
             "required": ["machine", "name"]
         }},
@@ -701,7 +702,7 @@ pub fn tool_definitions() -> Value {
         {"name": "move", "description": "Move the guest pointer", "inputSchema": pointer},
         {"name": "type_text", "description": "Type ASCII text through virtual hardware", "inputSchema": {
             "type": "object",
-            "properties": {"machine": machine_ref, "text": {"type": "string"}},
+            "properties": {"machine": machine_ref, "text": {"type": "string", "pattern": "^[\\x20-\\x7E\\r\\n\\t]*$"}},
             "required": ["machine", "text"]
         }},
         {"name": "key", "description": "Send a key or chord", "inputSchema": {
@@ -720,7 +721,7 @@ pub fn tool_definitions() -> Value {
         }},
         {"name": "checkpoint_create", "description": "Create a restorable machine checkpoint", "inputSchema": {
             "type": "object",
-            "properties": {"machine": machine_ref, "label": {"type": "string"}},
+            "properties": {"machine": machine_ref, "label": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_-]+$"}},
             "required": ["machine", "label"]
         }},
         {"name": "checkpoint_list", "description": "List checkpoints for a machine", "inputSchema": {
@@ -732,13 +733,23 @@ pub fn tool_definitions() -> Value {
             "type": "object",
             "properties": {
                 "machine": machine_ref,
-                "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"}
             },
             "required": ["machine", "checkpoint_id"]
         }},
         {"name": "checkpoint_restore", "description": "Restore a machine checkpoint", "inputSchema": {
             "type": "object",
-            "properties": {"checkpoint": {"type": "object"}},
+            "properties": {"checkpoint": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+                    "machine_id": {"type": "string", "minLength": 1},
+                    "created_unix_ms": {"type": "integer", "minimum": 0},
+                    "state_dir": {"type": "string", "minLength": 1},
+                    "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": ["id", "machine_id", "created_unix_ms", "state_dir"]
+            }},
             "required": ["checkpoint"]
         }},
         {"name": "ui_tree", "description": "Read the guest UI Automation tree", "inputSchema": {
@@ -1061,6 +1072,53 @@ mod tests {
         assert_eq!(
             logs.pointer("/inputSchema/properties/lines/default"),
             Some(&json!(50))
+        );
+        let create = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("machine_create"))
+            .expect("machine_create schema");
+        assert_eq!(
+            create.pointer("/inputSchema/properties/name/pattern"),
+            Some(&json!("^[A-Za-z0-9_-]+$"))
+        );
+        let status_tool = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("machine_status"))
+            .expect("machine_status schema");
+        assert_eq!(
+            status_tool.pointer("/inputSchema/properties/machine/oneOf/0/properties/state/enum"),
+            Some(&json!([
+                "defined",
+                "provisioning",
+                "stopped",
+                "running",
+                "paused",
+                "failed"
+            ]))
+        );
+        let type_text = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("type_text"))
+            .expect("type_text schema");
+        assert_eq!(
+            type_text.pointer("/inputSchema/properties/text/pattern"),
+            Some(&json!("^[\\x20-\\x7E\\r\\n\\t]*$"))
+        );
+        let restore = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("checkpoint_restore"))
+            .expect("checkpoint_restore schema");
+        assert_eq!(
+            restore.pointer("/inputSchema/properties/checkpoint/required"),
+            Some(&json!(["id", "machine_id", "created_unix_ms", "state_dir"]))
         );
     }
 

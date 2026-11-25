@@ -25,7 +25,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [
@@ -95,7 +103,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [
@@ -168,7 +184,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [
@@ -246,7 +270,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [
@@ -313,7 +345,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [
@@ -371,7 +411,15 @@
                   "type": "string"
                 },
                 "state": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "defined",
+                    "provisioning",
+                    "stopped",
+                    "running",
+                    "paused",
+                    "failed"
+                  ]
                 }
               },
               "required": [

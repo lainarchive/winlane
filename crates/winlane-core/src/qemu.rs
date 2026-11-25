@@ -813,6 +813,7 @@ impl QemuBackend {
                     registered.get(&id).cloned(),
                     &machine_state,
                     &record.handle.id,
+                    &record.handle.state_dir,
                 )
                 .await,
             );
@@ -821,6 +822,9 @@ impl QemuBackend {
             if !seen.contains(&id) {
                 entries.push(json!({
                     "id": id,
+                    "machine_id": checkpoint.machine_id,
+                    "state_dir": checkpoint.state_dir,
+                    "sha256": checkpoint.sha256,
                     "label": null,
                     "created_unix_ms": checkpoint.created_unix_ms,
                     "kind": null,
@@ -1443,9 +1447,13 @@ impl QemuBackend {
             .await
             .map_err(CoreError::io("read machine record", &path))?;
         let record: MachineRecord = serde_json::from_slice(&bytes)?;
-        if record.handle.id != machine.id || record.handle.name != machine.name {
+        if record.handle.id != machine.id
+            || record.handle.name != machine.name
+            || record.handle.backend != machine.backend
+            || record.handle.state_dir != machine.state_dir
+        {
             return Err(CoreError::InvalidHandle(
-                "machine id or name does not match the state directory".to_string(),
+                "machine id, name, backend, or state directory does not match the state directory record".to_string(),
             ));
         }
         Ok(record)
@@ -1495,6 +1503,7 @@ async fn checkpoint_catalog_entry(
     registered: Option<CheckpointRef>,
     machine_state: &MachineState,
     machine_id: &str,
+    machine_state_dir: &str,
 ) -> serde_json::Value {
     let metadata_path = dir.join("checkpoint.json");
     let metadata = tokio::fs::read(&metadata_path)
@@ -1510,6 +1519,12 @@ async fn checkpoint_catalog_entry(
     let stopped = matches!(machine_state, MachineState::Stopped);
     json!({
         "id": id,
+        "machine_id": machine_id,
+        "state_dir": machine_state_dir,
+        "sha256": metadata
+            .as_ref()
+            .and_then(|metadata| metadata.checkpoint.sha256.clone())
+            .or_else(|| registered.as_ref().and_then(|checkpoint| checkpoint.sha256.clone())),
         "label": metadata.as_ref().map(|metadata| metadata.label.clone()),
         "created_unix_ms": metadata.as_ref().map(|metadata| metadata.checkpoint.created_unix_ms).or_else(|| registered.as_ref().map(|checkpoint| checkpoint.created_unix_ms)),
         "kind": metadata.as_ref().map(|metadata| if metadata.vm_state_included { "running" } else { "stopped" }),

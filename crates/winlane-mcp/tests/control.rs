@@ -111,6 +111,9 @@ async fn mcp_tools_map_to_serialized_control_plane() {
             .iter()
             .any(|entry| {
                 entry["id"] == checkpoint["id"]
+                    && entry["machine_id"] == checkpoint["machine_id"]
+                    && entry["state_dir"] == checkpoint["state_dir"]
+                    && entry["sha256"] == checkpoint["sha256"]
                     && entry["kind"] == "running"
                     && entry["registered"] == true
             }),
@@ -152,6 +155,82 @@ async fn mcp_tools_map_to_serialized_control_plane() {
         .await
         .expect("checkpoint delete");
     assert_eq!(deleted["id"], checkpoint["id"]);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn semantic_tools_validate_machine_handle_before_guest_connect() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let spec = MachineSpec {
+        name: "semantic-handle".to_string(),
+        arch: CpuArch::X86_64,
+        memory_mb: 512,
+        cpus: 1,
+        disk_gb: 16,
+        iso_path: None,
+        base_image_path: None,
+        guest_agent: true,
+        network: NetworkMode::Isolated,
+        tpm: false,
+        boot: BootMode::Bios,
+    };
+    let machine = backend.create_machine(&spec).await.expect("create machine");
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move { serve_unix_control(server_socket, backend).await });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mcp = McpControlPlane::new(&socket_path);
+    let valid_error = mcp
+        .dispatch(
+            "process_run",
+            &json!({
+                "machine": serde_json::to_value(&machine).expect("machine json"),
+                "command": r"C:\Windows\System32\cmd.exe",
+            }),
+        )
+        .await
+        .expect_err("stopped valid machine should reach guest connection boundary");
+    assert!(
+        valid_error
+            .to_string()
+            .contains("guest agent connection failed"),
+        "{valid_error}"
+    );
+
+    let mut foreign = machine.clone();
+    foreign.backend = "hyperv".to_string();
+    let foreign_error = mcp
+        .dispatch(
+            "process_run",
+            &json!({
+                "machine": serde_json::to_value(&foreign).expect("foreign machine json"),
+                "command": r"C:\Windows\System32\cmd.exe",
+            }),
+        )
+        .await
+        .expect_err("foreign backend handle must be rejected");
+    assert!(
+        foreign_error
+            .to_string()
+            .contains("id, name, backend, or state directory"),
+        "{foreign_error}"
+    );
+    assert!(
+        !foreign_error
+            .to_string()
+            .contains("guest agent connection failed"),
+        "{foreign_error}"
+    );
     server.abort();
 }
 

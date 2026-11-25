@@ -40,9 +40,9 @@ Rules:
 - `timeout_ms` is optional on `ui_invoke`, `ui_set_text`, and `process_run`; it is bounded to 1–600000 milliseconds and defaults to 30000.
 - `machine_wait` requires `for` to be `guest-agent`; `timeout_seconds` is optional, bounded to 1–600 seconds, and defaults to 60. Timeout is a completed wait result containing `ready:false` and `error:"timeout"`, while invalid input and control-plane failures remain tool errors.
 - `machine_logs` accepts optional `lines`, bounded to 1–1000 and defaulting to 50. It forwards to the control-plane machine log operation and returns the same structured `qemu_log`/`swtpm_log` result shape.
-- `machine_create` defaults to 4096 MiB memory, 4 CPUs, 64 GiB disk, isolated networking, guest agent enabled, TPM enabled, and UEFI boot.
+- `machine_create` defaults to 4096 MiB memory, 4 CPUs, 64 GiB disk, isolated networking, guest agent enabled, TPM enabled, and UEFI boot. Machine names, checkpoint labels, and checkpoint ids are ASCII letters, digits, hyphen, or underscore. Hardware `type_text` accepts printable ASCII plus carriage return, newline, and tab.
 - MCP `checkpoint_create` currently requires `label`, even though CLI checkpoint labels are optional.
 - MCP `checkpoint_restore` accepts a full `checkpoint` object returned by checkpoint creation/listing; it does not accept the CLI’s `--machine` plus `--checkpoint-id` shorthand.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.
-- Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string. Name strings resolve through `machine_list`; absent or ambiguous names are invalid.
+- Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string. Name strings resolve through `machine_list`; absent or ambiguous names are invalid. Semantic guest operations validate the handle against the control daemon before connecting to the guest agent; stale or foreign handles are rejected before use.
