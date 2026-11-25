@@ -62,6 +62,9 @@ pub enum ControlRequest {
     Restore {
         checkpoint: CheckpointRef,
     },
+    CheckpointList {
+        machine: MachineHandle,
+    },
     CaptureFrame {
         machine: MachineHandle,
     },
@@ -273,6 +276,7 @@ async fn dispatch(
             .restore_checkpoint(&checkpoint)
             .await
             .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
+        ControlRequest::CheckpointList { machine } => backend.list_checkpoints(&machine).await,
         ControlRequest::CaptureFrame { machine } => backend
             .capture_frame(&machine)
             .await

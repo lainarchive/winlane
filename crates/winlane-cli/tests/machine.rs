@@ -230,6 +230,68 @@ async fn machine_name_resolution_errors_on_no_match_and_multiple_matches() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_list_invokes_exact_ipc_operation_and_prints_compact_array() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let expected_machine = machine();
+    let catalog = serde_json::json!([
+        {
+            "id": "checkpoint-a",
+            "label": "before",
+            "created_unix_ms": 10,
+            "kind": "running",
+            "state_dir_bytes": 123,
+            "registered": true,
+            "restorable": true,
+            "error": null,
+        },
+        {
+            "id": "checkpoint-b",
+            "label": "after",
+            "created_unix_ms": 20,
+            "kind": "stopped",
+            "state_dir_bytes": 45,
+            "registered": true,
+            "restorable": false,
+            "error": null,
+        }
+    ]);
+    let server_catalog = catalog.clone();
+    let server = tokio::spawn(async move {
+        let listener = UnixListener::bind(server_socket).expect("bind control socket");
+        let (stream, _) = listener.accept().await.expect("accept control client");
+        let request = write_control_response(stream, server_catalog).await;
+        assert_eq!(
+            request,
+            ControlRequest::CheckpointList {
+                machine: expected_machine
+            }
+        );
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let args = winlane_cli::args::CheckpointListArgs {
+        control_socket: socket_path,
+        machine_json: Some(serde_json::to_string(&machine()).expect("encode machine")),
+        machine_name: None,
+    };
+    let mut output = Vec::new();
+    run_machine_command(&MachineCommand::CheckpointList(args), &mut output)
+        .await
+        .expect("run checkpoint list");
+    server.await.expect("server task");
+    assert!(output.ends_with(b"\n"));
+    assert!(!output[..output.len() - 1].contains(&b'\n'));
+    let output_json: serde_json::Value = serde_json::from_slice(&output).expect("decode output");
+    assert_eq!(output_json, catalog);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guest_machine_name_resolves_through_control_list_before_qga_connect() {
     let root = tempfile::tempdir().expect("temporary directory");
     let socket_path = root.path().join("control.sock");

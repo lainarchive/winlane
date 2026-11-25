@@ -158,6 +158,16 @@ cargo run --release -p winlane-cli -- machine checkpoint create \
   > /tmp/demo-1-checkpoint.json
 ```
 
+List registered and orphaned checkpoint metadata for a machine. Output is a compact JSON array; corrupt or missing metadata is reported in-place and never deleted or repaired implicitly:
+
+```sh
+cargo run --release -p winlane-cli -- machine checkpoint list \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1
+```
+
+Entries contain `id`, `label`, `created_unix_ms`, `kind`, `state_dir_bytes`, `registered`, `restorable`, and `error`. `state_dir_bytes` counts only checkpoint artifacts stored outside the qcow2 image; QEMU-internal disk and memory snapshot size is not cheaply available. `restorable` is a cheap metadata, registry, and stopped-machine preflight, not a guarantee that restore cannot fail.
+
 The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
 
 ```sh

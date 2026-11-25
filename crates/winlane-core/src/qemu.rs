@@ -441,6 +441,14 @@ impl QemuBackend {
     }
 
     pub async fn status_machine(&mut self, machine: &MachineHandle) -> CoreResult<MachineState> {
+        self.inspect_machine_state(machine, true).await
+    }
+
+    async fn inspect_machine_state(
+        &mut self,
+        machine: &MachineHandle,
+        persist: bool,
+    ) -> CoreResult<MachineState> {
         let mut record = self.load_record(machine).await?;
         let machine_id = record.handle.id.clone();
         let mut remove_dead_process = false;
@@ -449,7 +457,7 @@ impl QemuBackend {
                 "inspect qemu process",
                 record.disk_path.clone(),
             ))? {
-                if let Some(process) = &mut running.swtpm {
+                if persist && let Some(process) = &mut running.swtpm {
                     let _ = process.kill().await;
                 }
                 remove_dead_process = true;
@@ -490,16 +498,18 @@ impl QemuBackend {
             }
         };
 
-        if remove_dead_process {
-            self.running.remove(&machine_id);
+        if persist {
+            if remove_dead_process {
+                self.running.remove(&machine_id);
+            }
+            record.handle.state = state.clone();
+            if matches!(state, MachineState::Stopped)
+                || (matches!(state, MachineState::Failed) && remove_dead_process)
+            {
+                record.pid = None;
+            }
+            self.write_record(&record).await?;
         }
-        record.handle.state = state.clone();
-        if matches!(state, MachineState::Stopped)
-            || (matches!(state, MachineState::Failed) && remove_dead_process)
-        {
-            record.pid = None;
-        }
-        self.write_record(&record).await?;
         Ok(state)
     }
 
@@ -723,6 +733,80 @@ impl QemuBackend {
         record.checkpoints.push(checkpoint.clone());
         self.write_record(&record).await?;
         Ok(checkpoint)
+    }
+
+    pub async fn list_checkpoints(
+        &mut self,
+        machine: &MachineHandle,
+    ) -> CoreResult<serde_json::Value> {
+        let record = self.load_record(machine).await?;
+        let machine_state = self.inspect_machine_state(machine, false).await?;
+        let state_dir = PathBuf::from(&record.handle.state_dir);
+        let root = state_dir.join(CHECKPOINT_DIR);
+        let mut entries = Vec::new();
+        let registered: std::collections::BTreeMap<String, CheckpointRef> = record
+            .checkpoints
+            .iter()
+            .map(|checkpoint| (checkpoint.id.clone(), checkpoint.clone()))
+            .collect();
+        let mut dirs = Vec::new();
+        if tokio::fs::try_exists(&root)
+            .await
+            .map_err(CoreError::io("check checkpoint root", &root))?
+        {
+            let mut read = tokio::fs::read_dir(&root)
+                .await
+                .map_err(CoreError::io("read checkpoint root", &root))?;
+            while let Some(entry) = read
+                .next_entry()
+                .await
+                .map_err(CoreError::io("iterate checkpoint root", &root))?
+            {
+                if entry
+                    .file_type()
+                    .await
+                    .map(|kind| kind.is_dir())
+                    .unwrap_or(false)
+                {
+                    dirs.push(entry.path());
+                }
+            }
+        }
+        dirs.sort();
+        let mut seen = std::collections::BTreeSet::new();
+        for dir in dirs {
+            let id = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            seen.insert(id.clone());
+            entries.push(
+                checkpoint_catalog_entry(
+                    &dir,
+                    id.clone(),
+                    registered.get(&id).cloned(),
+                    &machine_state,
+                    &record.handle.id,
+                )
+                .await,
+            );
+        }
+        for (id, checkpoint) in registered {
+            if !seen.contains(&id) {
+                entries.push(json!({
+                    "id": id,
+                    "label": null,
+                    "created_unix_ms": checkpoint.created_unix_ms,
+                    "kind": null,
+                    "state_dir_bytes": null,
+                    "registered": true,
+                    "restorable": false,
+                    "error": "checkpoint directory is missing",
+                }));
+            }
+        }
+        Ok(json!(entries))
     }
 
     pub async fn restore_checkpoint(
@@ -1310,6 +1394,59 @@ impl QemuBackend {
         }
         Ok(())
     }
+}
+
+async fn checkpoint_catalog_entry(
+    dir: &Path,
+    id: String,
+    registered: Option<CheckpointRef>,
+    machine_state: &MachineState,
+    machine_id: &str,
+) -> serde_json::Value {
+    let metadata_path = dir.join("checkpoint.json");
+    let metadata = tokio::fs::read(&metadata_path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CheckpointMetadata>(&bytes).ok());
+    let size = checkpoint_dir_bytes(dir).await;
+    let valid = metadata.as_ref().is_some_and(|metadata| {
+        metadata.checkpoint.id == id
+            && metadata.checkpoint.machine_id == machine_id
+            && metadata.backend == "qemu"
+    });
+    let stopped = matches!(machine_state, MachineState::Stopped);
+    json!({
+        "id": id,
+        "label": metadata.as_ref().map(|metadata| metadata.label.clone()),
+        "created_unix_ms": metadata.as_ref().map(|metadata| metadata.checkpoint.created_unix_ms).or_else(|| registered.as_ref().map(|checkpoint| checkpoint.created_unix_ms)),
+        "kind": metadata.as_ref().map(|metadata| if metadata.vm_state_included { "running" } else { "stopped" }),
+        "state_dir_bytes": size,
+        "registered": registered.is_some(),
+        "restorable": registered.is_some() && valid && stopped,
+        "error": if metadata.is_none() { Some("checkpoint metadata is missing or corrupt") } else if !valid { Some("checkpoint metadata does not match this machine") } else { None },
+    })
+}
+
+async fn checkpoint_dir_bytes(dir: &Path) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let mut read = tokio::fs::read_dir(&path).await.ok()?;
+        loop {
+            let entry = match read.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => return None,
+            };
+            let kind = entry.file_type().await.ok()?;
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                total += entry.metadata().await.ok()?.len();
+            }
+        }
+    }
+    Some(total)
 }
 
 impl MachineBackend for QemuBackend {
@@ -2171,6 +2308,214 @@ mod tests {
             backend.list_machines().await.expect("list machines"),
             vec![handle]
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_catalog_reports_registered_orphaned_corrupt_and_missing_entries() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut backend = QemuBackend::new(root.path()).await.expect("backend");
+        let state_dir = root.path().join("builder");
+        tokio::fs::create_dir(&state_dir).await.expect("state dir");
+        let handle = MachineHandle {
+            id: "machine-1".into(),
+            name: "builder".into(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            backend: "qemu".into(),
+            state: MachineState::Stopped,
+        };
+        let checkpoint = |id: &str, created: u64| CheckpointRef {
+            id: id.into(),
+            machine_id: handle.id.clone(),
+            created_unix_ms: created,
+            state_dir: handle.state_dir.clone(),
+            sha256: Some("x".repeat(64)),
+        };
+        let record = MachineRecord {
+            handle: handle.clone(),
+            spec: MachineSpec {
+                name: "builder".into(),
+                arch: CpuArch::X86_64,
+                memory_mb: 4096,
+                cpus: 4,
+                disk_gb: 64,
+                iso_path: None,
+                base_image_path: None,
+                guest_agent: true,
+                network: NetworkMode::Isolated,
+                tpm: true,
+                boot: BootMode::Uefi,
+            },
+            disk_path: state_dir.join(DISK_FILE),
+            qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+            qga_socket_path: None,
+            pid: None,
+            ovmf_vars_path: None,
+            tpm_state_dir: None,
+            pending_loadvm: None,
+            checkpoints: vec![
+                checkpoint("checkpoint-a", 10),
+                checkpoint("checkpoint-b", 20),
+                checkpoint("checkpoint-missing", 30),
+            ],
+        };
+        let machine_record_bytes = serde_json::to_vec(&record).unwrap();
+        tokio::fs::write(state_dir.join(MACHINE_FILE), &machine_record_bytes)
+            .await
+            .unwrap();
+        let root_dir = state_dir.join(CHECKPOINT_DIR);
+        for (id, label, vm) in [
+            ("checkpoint-a", "before", true),
+            ("checkpoint-b", "after", false),
+            ("checkpoint-orphan", "orphan", false),
+        ] {
+            let dir = root_dir.join(id);
+            tokio::fs::create_dir_all(&dir).await.unwrap();
+            let checkpoint_ref = checkpoint(id, if id.ends_with('a') { 10 } else { 20 });
+            let metadata = CheckpointMetadata {
+                checkpoint: checkpoint_ref,
+                label: label.into(),
+                backend: "qemu".into(),
+                qemu_snapshot: id.into(),
+                disk_state_included: true,
+                vm_state_included: vm,
+                firmware_vars_included: false,
+                tpm_state_included: false,
+            };
+            tokio::fs::write(
+                dir.join("checkpoint.json"),
+                serde_json::to_vec(&metadata).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::fs::write(
+            root_dir.join("checkpoint-b").join("checkpoint.json"),
+            b"corrupt",
+        )
+        .await
+        .unwrap();
+        let foreign_dir = root_dir.join("checkpoint-foreign");
+        tokio::fs::create_dir_all(&foreign_dir).await.unwrap();
+        let mut foreign_checkpoint = checkpoint("checkpoint-foreign", 40);
+        foreign_checkpoint.machine_id = "other-machine".into();
+        let foreign_metadata = CheckpointMetadata {
+            checkpoint: foreign_checkpoint,
+            label: "foreign".into(),
+            backend: "qemu".into(),
+            qemu_snapshot: "checkpoint-foreign".into(),
+            disk_state_included: true,
+            vm_state_included: false,
+            firmware_vars_included: false,
+            tpm_state_included: false,
+        };
+        tokio::fs::write(
+            foreign_dir.join("checkpoint.json"),
+            serde_json::to_vec(&foreign_metadata).unwrap(),
+        )
+        .await
+        .unwrap();
+        let result = backend.list_checkpoints(&handle).await.expect("catalog");
+        let entries = result.as_array().expect("array");
+        assert_eq!(entries.len(), 5);
+        let entry = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("missing catalog entry {id}"))
+        };
+        assert_eq!(entry("checkpoint-a")["label"], "before");
+        assert_eq!(entry("checkpoint-a")["kind"], "running");
+        assert_eq!(entry("checkpoint-a")["registered"], true);
+        assert_eq!(entry("checkpoint-a")["restorable"], true);
+        assert_eq!(entry("checkpoint-b")["label"], serde_json::Value::Null);
+        assert_eq!(entry("checkpoint-b")["restorable"], false);
+        assert_eq!(entry("checkpoint-missing")["registered"], true);
+        assert_eq!(
+            entry("checkpoint-missing")["error"],
+            "checkpoint directory is missing"
+        );
+        assert_eq!(entry("checkpoint-orphan")["label"], "orphan");
+        assert_eq!(entry("checkpoint-orphan")["registered"], false);
+        assert_eq!(entry("checkpoint-orphan")["restorable"], false);
+        assert_eq!(
+            entry("checkpoint-foreign")["error"],
+            "checkpoint metadata does not match this machine"
+        );
+        assert_eq!(entry("checkpoint-foreign")["restorable"], false);
+        assert_eq!(
+            tokio::fs::read(root_dir.join("checkpoint-b").join("checkpoint.json"))
+                .await
+                .unwrap(),
+            b"corrupt"
+        );
+        assert!(root_dir.join("checkpoint-orphan").exists());
+        assert_eq!(
+            tokio::fs::read(state_dir.join(MACHINE_FILE)).await.unwrap(),
+            machine_record_bytes
+        );
+
+        let mut running_record: MachineRecord =
+            serde_json::from_slice(&machine_record_bytes).expect("decode record");
+        running_record.handle.state = MachineState::Running;
+        tokio::fs::write(
+            state_dir.join(MACHINE_FILE),
+            serde_json::to_vec(&running_record).unwrap(),
+        )
+        .await
+        .unwrap();
+        let result = backend.list_checkpoints(&handle).await.expect("catalog");
+        let entries = result.as_array().expect("array");
+        let running_entry = entries
+            .iter()
+            .find(|entry| entry["id"] == "checkpoint-a")
+            .expect("checkpoint entry");
+        assert_eq!(running_entry["restorable"], false);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_catalog_empty_registry_is_empty_array() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut backend = QemuBackend::new(root.path()).await.expect("backend");
+        let state_dir = root.path().join("builder");
+        tokio::fs::create_dir(&state_dir).await.unwrap();
+        let handle = MachineHandle {
+            id: "machine-1".into(),
+            name: "builder".into(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            backend: "qemu".into(),
+            state: MachineState::Defined,
+        };
+        let record = MachineRecord {
+            handle: handle.clone(),
+            spec: MachineSpec {
+                name: "builder".into(),
+                arch: CpuArch::X86_64,
+                memory_mb: 4096,
+                cpus: 4,
+                disk_gb: 64,
+                iso_path: None,
+                base_image_path: None,
+                guest_agent: true,
+                network: NetworkMode::Isolated,
+                tpm: true,
+                boot: BootMode::Uefi,
+            },
+            disk_path: state_dir.join(DISK_FILE),
+            qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+            qga_socket_path: None,
+            pid: None,
+            ovmf_vars_path: None,
+            tpm_state_dir: None,
+            pending_loadvm: None,
+            checkpoints: vec![],
+        };
+        tokio::fs::write(
+            state_dir.join(MACHINE_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.list_checkpoints(&handle).await.unwrap(), json!([]));
     }
 
     #[test]
