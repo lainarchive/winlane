@@ -306,7 +306,14 @@ cargo run --release -p winlane-cli -- machine stop \
   --machine-json "$machine"
 ```
 
-The daemon does not yet have a shutdown RPC. SIGINT and SIGTERM enumerate recorded machines, stop those still running or paused, then remove the Unix control socket. SIGKILL can leave a stale socket file, which the next daemon startup replaces when no active listener is present.
+Stop the daemon through the control plane when finished:
+
+```sh
+cargo run --release -p winlane-cli -- daemon stop \
+  --control-socket /tmp/winlane-control.sock
+```
+
+The stop response is delivered before the daemon exits. Once shutdown starts, new control requests are rejected; the daemon then stops recorded machines through the same cleanup path used for SIGINT/SIGTERM and removes the Unix control socket. SIGKILL can leave a stale socket file, which the next daemon startup replaces when no active listener is present.
 
 ## Architecture
 

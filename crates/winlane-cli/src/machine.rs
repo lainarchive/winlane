@@ -9,13 +9,20 @@ use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 use crate::CliResult;
 use crate::args::{
     CheckpointCreateArgs, CheckpointListArgs, CheckpointRestoreArgs, CloneArgs, CreateArgs,
-    DaemonArgs, MachineArgs, MachineCommand, McpArgs, WaitArgs,
+    DaemonArgs, DaemonStopArgs, MachineArgs, MachineCommand, McpArgs, WaitArgs,
 };
 
 pub async fn run_daemon(args: DaemonArgs) -> CliResult<()> {
     let backend = QemuBackend::new(args.root).await?;
     serve_unix_control(args.control_socket, backend).await?;
     Ok(())
+}
+
+pub async fn run_daemon_stop(args: &DaemonStopArgs, output: &mut impl Write) -> CliResult<()> {
+    let result = UnixControlClient::new(args.control_socket.clone())
+        .invoke(&ControlRequest::Shutdown)
+        .await?;
+    write_json_line(output, &result)
 }
 
 pub async fn run_machine_command(

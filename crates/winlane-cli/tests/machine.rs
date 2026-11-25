@@ -2,7 +2,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use winlane_cli::args::{GuestInvokeArgs, GuestMachineArgs};
 use winlane_cli::{
-    GuestCommand, MachineArgs, MachineCommand, run_guest_command, run_machine_command,
+    DaemonStopArgs, GuestCommand, MachineArgs, MachineCommand, run_daemon_stop, run_guest_command,
+    run_machine_command,
 };
 use winlane_contracts::{MachineHandle, MachineState};
 use winlane_ipc::{ControlRequest, ControlResponse};
@@ -100,6 +101,38 @@ async fn write_control_response(
         .await
         .expect("write response");
     request
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_stop_invokes_exact_ipc_operation_and_prints_json() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move {
+        let listener = UnixListener::bind(server_socket).expect("bind control socket");
+        let (stream, _) = listener.accept().await.expect("accept control client");
+        let request =
+            write_control_response(stream, serde_json::json!({"shutdown":"initiated"})).await;
+        assert_eq!(request, ControlRequest::Shutdown);
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let mut output = Vec::new();
+    run_daemon_stop(
+        &DaemonStopArgs {
+            control_socket: socket_path,
+        },
+        &mut output,
+    )
+    .await
+    .expect("run daemon stop");
+    server.await.expect("server task");
+    assert_eq!(output, b"{\"shutdown\":\"initiated\"}\n");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

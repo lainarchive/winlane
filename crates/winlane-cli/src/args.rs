@@ -6,9 +6,10 @@ use winlane_guest::uia::{UiaView, is_valid_runtime_id};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane doctor [--root PATH]\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint list --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH\n       winlane machine wait --control-socket PATH (--machine-json JSON | --machine NAME) --for guest-agent [--timeout-seconds N]\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane daemon stop --control-socket PATH\n       winlane doctor [--root PATH]\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint list --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH\n       winlane machine wait --control-socket PATH (--machine-json JSON | --machine NAME) --for guest-agent [--timeout-seconds N]\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
+pub const DAEMON_STOP_USAGE: &str = "usage: winlane daemon stop --control-socket PATH";
 pub const DOCTOR_USAGE: &str = "usage: winlane doctor [--root PATH]";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
 pub const MACHINE_LIST_USAGE: &str = "usage: winlane machine list --control-socket PATH";
@@ -45,6 +46,11 @@ pub struct ViewArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonArgs {
     pub root: PathBuf,
+    pub control_socket: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonStopArgs {
     pub control_socket: PathBuf,
 }
 
@@ -237,6 +243,7 @@ pub enum Command {
     Help,
     View(ViewArgs),
     Daemon(DaemonArgs),
+    DaemonStop(DaemonStopArgs),
     Doctor(DoctorArgs),
     Machine(MachineCommand),
     Mcp(McpArgs),
@@ -250,6 +257,9 @@ pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
     }
     match args[0].as_str() {
         "view" => parse_view_args(&args[1..]).map(Command::View),
+        "daemon" if args.get(1).is_some_and(|arg| arg == "stop") => {
+            parse_daemon_stop_args(&args[2..]).map(Command::DaemonStop)
+        }
         "daemon" => parse_daemon_args(&args[1..]).map(Command::Daemon),
         "doctor" => parse_doctor_args(&args[1..]).map(Command::Doctor),
         "machine" => parse_machine_args(&args[1..]).map(Command::Machine),
@@ -381,6 +391,13 @@ fn parse_machine_args(args: &[String]) -> Result<MachineCommand, CliError> {
             "unknown machine action {action}; {USAGE}"
         ))),
     }
+}
+
+fn parse_daemon_stop_args(args: &[String]) -> Result<DaemonStopArgs, CliError> {
+    let options = ParsedOptions::parse(args, DAEMON_STOP_USAGE, &["--control-socket"])?;
+    Ok(DaemonStopArgs {
+        control_socket: PathBuf::from(options.required("--control-socket", DAEMON_STOP_USAGE)?),
+    })
 }
 
 fn parse_doctor_args(args: &[String]) -> Result<DoctorArgs, CliError> {
@@ -1140,6 +1157,22 @@ mod tests {
             parse_args(&args).unwrap(),
             Command::Daemon(DaemonArgs {
                 root: PathBuf::from("/tmp/machines"),
+                control_socket: PathBuf::from("/tmp/control.sock"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_daemon_stop_command() {
+        let args = vec![
+            "daemon".to_string(),
+            "stop".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Command::DaemonStop(DaemonStopArgs {
                 control_socket: PathBuf::from("/tmp/control.sock"),
             })
         );
