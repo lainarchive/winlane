@@ -8,10 +8,12 @@ repository.workspace = true
 winlane-contracts.workspace = true
 winlane-ipc.workspace = true
 winlane-evidence.workspace = true
+winlane-guest = { path = "../winlane-guest" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+base64 = "0.22"
 
 [dev-dependencies]
 winlane-core.workspace = true

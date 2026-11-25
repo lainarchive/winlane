@@ -2,9 +2,16 @@
 
 pub mod server;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::time::Duration;
 use thiserror::Error;
-use winlane_contracts::{CheckpointRef, ControlEvent, MachineHandle, MouseButton, ScrollDirection};
+use winlane_contracts::{
+    CheckpointRef, ControlEvent, MachineHandle, MouseButton, ScrollDirection, UiNodeRef,
+};
+use winlane_guest::qga::{QgaClient, QgaTransport, UnixQgaTransport};
+use winlane_guest::uia::{BlockingUiaControl, UiaResult};
 use winlane_ipc::{ControlRequest, IpcError, UnixControlClient};
 
 pub type McpResult<T> = Result<T, McpError>;
@@ -21,12 +28,17 @@ pub enum McpError {
     Serialization(#[from] serde_json::Error),
     #[error("stdio transport error: {0}")]
     Io(String),
+    #[error("guest agent connection failed: {0}")]
+    GuestConnect(String),
     #[error(transparent)]
     Evidence(#[from] winlane_evidence::EvidenceError),
+    #[error(transparent)]
+    Uia(#[from] winlane_guest::uia::UiaError),
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
 }
 
-/// Narrow MCP-facing seam. It exposes only the hardware-plane operations in
-/// the contract; guest semantic tools remain unavailable until the guest helper exists.
+/// MCP-facing seam for serialized hardware-plane control plus direct guest semantic operations.
 pub struct McpControlPlane {
     client: UnixControlClient,
 }
@@ -51,6 +63,12 @@ impl McpControlPlane {
             "scroll" => self.scroll(input).await,
             "checkpoint_create" => self.checkpoint_create(input).await,
             "checkpoint_restore" => self.checkpoint_restore(input).await,
+            "ui_tree" => self.ui_tree(input).await,
+            "ui_invoke" => self.ui_invoke(input).await,
+            "ui_set_text" => self.ui_set_text(input).await,
+            "process_run" => self.process_run(input).await,
+            "file_import" => self.file_import(input).await,
+            "file_export" => self.file_export(input).await,
             other => Err(McpError::UnknownTool(other.to_string())),
         }
     }
@@ -179,11 +197,175 @@ impl McpControlPlane {
             .await?)
     }
 
+    pub async fn ui_tree(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let max_depth = optional_bounded_u64(input, "max_depth", 8, 1, 32)? as u16;
+        let max_nodes = optional_bounded_u64(input, "max_nodes", 2000, 1, 20_000)? as u32;
+        self.semantic(
+            machine,
+            SemanticOperation::UiTree {
+                max_depth,
+                max_nodes,
+            },
+        )
+        .await
+    }
+
+    pub async fn ui_invoke(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let node = required_string(input, "node")?;
+        self.semantic(machine, SemanticOperation::Invoke { node })
+            .await
+    }
+
+    pub async fn ui_set_text(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let node = required_string(input, "node")?;
+        let text = required_string(input, "text")?;
+        self.semantic(machine, SemanticOperation::SetText { node, text })
+            .await
+    }
+
+    pub async fn process_run(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let command = required_string(input, "command")?;
+        let args = optional_string_array(input, "args")?;
+        let timeout_ms = optional_bounded_u64(input, "timeout_ms", 30_000, 1, 600_000)?;
+        self.semantic(
+            machine,
+            SemanticOperation::Run {
+                command,
+                args,
+                timeout_ms,
+            },
+        )
+        .await
+    }
+
+    pub async fn file_import(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let host_path = PathBuf::from(required_string(input, "host_path")?);
+        let guest_path = required_string(input, "guest_path")?;
+        self.semantic(
+            machine,
+            SemanticOperation::Import {
+                host_path,
+                guest_path,
+            },
+        )
+        .await
+    }
+
+    pub async fn file_export(&self, input: &Value) -> McpResult<Value> {
+        let machine = machine_input(input)?;
+        let guest_path = required_string(input, "guest_path")?;
+        let host_path = PathBuf::from(required_string(input, "host_path")?);
+        self.semantic(
+            machine,
+            SemanticOperation::Export {
+                guest_path,
+                host_path,
+            },
+        )
+        .await
+    }
+
+    async fn semantic(
+        &self,
+        machine: MachineHandle,
+        operation: SemanticOperation,
+    ) -> McpResult<Value> {
+        tokio::task::spawn_blocking(move || {
+            let qga_socket = PathBuf::from(machine.state_dir).join("qga.sock");
+            let transport = UnixQgaTransport::connect(qga_socket, Duration::from_secs(5))
+                .map_err(|error| McpError::GuestConnect(error.to_string()))?;
+            let mut control = BlockingUiaControl::new(QgaClient::new(transport));
+            execute_semantic_operation(&mut control, operation).map_err(McpError::from)
+        })
+        .await?
+    }
+
     async fn control(&self, machine: MachineHandle, event: ControlEvent) -> McpResult<Value> {
         Ok(self
             .client
             .invoke(&ControlRequest::Control { machine, event })
             .await?)
+    }
+}
+
+#[derive(Debug)]
+enum SemanticOperation {
+    UiTree {
+        max_depth: u16,
+        max_nodes: u32,
+    },
+    Invoke {
+        node: String,
+    },
+    SetText {
+        node: String,
+        text: String,
+    },
+    Run {
+        command: String,
+        args: Vec<String>,
+        timeout_ms: u64,
+    },
+    Import {
+        host_path: PathBuf,
+        guest_path: String,
+    },
+    Export {
+        guest_path: String,
+        host_path: PathBuf,
+    },
+}
+
+fn execute_semantic_operation<T: QgaTransport>(
+    control: &mut BlockingUiaControl<T>,
+    operation: SemanticOperation,
+) -> UiaResult<Value> {
+    match operation {
+        SemanticOperation::UiTree {
+            max_depth,
+            max_nodes,
+        } => control.ui_tree(max_depth, max_nodes),
+        SemanticOperation::Invoke { node } => control.invoke(&node_ref(&node)),
+        SemanticOperation::SetText { node, text } => control.set_text(&node_ref(&node), &text),
+        SemanticOperation::Run {
+            command,
+            args,
+            timeout_ms,
+        } => {
+            let capture = control.run_process_blocking(&command, &args, timeout_ms)?;
+            Ok(json!({
+                "exit_code": capture.exit_code,
+                "stdout_base64": STANDARD.encode(&capture.stdout),
+                "stderr_base64": STANDARD.encode(&capture.stderr),
+            }))
+        }
+        SemanticOperation::Import {
+            host_path,
+            guest_path,
+        } => Ok(serde_json::to_value(
+            control.import_file_blocking(&host_path, &guest_path)?,
+        )?),
+        SemanticOperation::Export {
+            guest_path,
+            host_path,
+        } => Ok(serde_json::to_value(
+            control.export_file_blocking(&guest_path, &host_path)?,
+        )?),
+    }
+}
+
+fn node_ref(path: &str) -> UiNodeRef {
+    UiNodeRef {
+        id: path.to_string(),
+        generation: 0,
+        automation_id: None,
+        control_type: None,
+        bounds: None,
     }
 }
 
@@ -258,6 +440,60 @@ pub fn tool_definitions() -> Value {
             "type": "object",
             "properties": {"checkpoint": {"type": "object"}},
             "required": ["checkpoint"]
+        }},
+        {"name": "ui_tree", "description": "Read the guest UI Automation tree", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "max_depth": {"type": "integer", "minimum": 1, "maximum": 32, "default": 8},
+                "max_nodes": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 2000}
+            },
+            "required": ["machine"]
+        }},
+        {"name": "ui_invoke", "description": "Invoke a UI element by tree node path", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"}
+            },
+            "required": ["machine", "node"]
+        }},
+        {"name": "ui_set_text", "description": "Set text on a UI element by tree node path", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
+                "text": {"type": "string", "maxLength": 4096}
+            },
+            "required": ["machine", "node", "text"]
+        }},
+        {"name": "process_run", "description": "Run a guest process and capture exit status", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "command": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}, "default": []},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000, "default": 30000}
+            },
+            "required": ["machine", "command"]
+        }},
+        {"name": "file_import", "description": "Copy a host file into the guest", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "host_path": {"type": "string"},
+                "guest_path": {"type": "string"}
+            },
+            "required": ["machine", "host_path", "guest_path"]
+        }},
+        {"name": "file_export", "description": "Copy a guest file to the host", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "guest_path": {"type": "string"},
+                "host_path": {"type": "string"}
+            },
+            "required": ["machine", "guest_path", "host_path"]
         }}
     ])
 }
@@ -287,6 +523,45 @@ fn optional_string(input: &Value, field: &str) -> McpResult<Option<String>> {
     }
 }
 
+fn optional_string_array(input: &Value, field: &str) -> McpResult<Vec<String>> {
+    match input.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    McpError::InvalidInput(format!("field '{field}' must contain only strings"))
+                })
+            })
+            .collect(),
+        Some(_) => Err(McpError::InvalidInput(format!(
+            "field '{field}' must be an array"
+        ))),
+    }
+}
+
+fn optional_bounded_u64(
+    input: &Value,
+    field: &str,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+) -> McpResult<u64> {
+    let value = match input.get(field) {
+        None | Some(Value::Null) => default,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| McpError::InvalidInput(format!("field '{field}' must be an integer")))?,
+    };
+    if (minimum..=maximum).contains(&value) {
+        Ok(value)
+    } else {
+        Err(McpError::InvalidInput(format!(
+            "field '{field}' must be {minimum}..={maximum}"
+        )))
+    }
+}
+
 fn required_u32(input: &Value, field: &str) -> McpResult<u32> {
     let value = input.get(field).and_then(Value::as_u64).ok_or_else(|| {
         McpError::InvalidInput(format!("missing required integer field '{field}'"))
@@ -296,15 +571,78 @@ fn required_u32(input: &Value, field: &str) -> McpResult<u32> {
 }
 
 pub fn implementation_status() -> &'static str {
-    "hardware-control-tools"
+    "semantic-guest-tools"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::rc::Rc;
+
+    type WrittenRequests = Rc<RefCell<Vec<Value>>>;
+
+    struct MockQgaTransport {
+        incoming: VecDeque<Vec<u8>>,
+        exec_output: Option<(i32, Vec<u8>, Vec<u8>)>,
+        written: WrittenRequests,
+    }
+
+    impl QgaTransport for MockQgaTransport {
+        fn write_raw(&mut self, _bytes: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_message(&mut self, bytes: &[u8]) -> io::Result<()> {
+            let request: Value = serde_json::from_slice(bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            self.written.borrow_mut().push(request.clone());
+            let execute = request
+                .get("execute")
+                .and_then(Value::as_str)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing execute"))?;
+            let result = match execute {
+                "guest-exec" => json!({ "pid": 99 }),
+                "guest-exec-status" => {
+                    let (exit_code, stdout, stderr) =
+                        self.exec_output
+                            .take()
+                            .unwrap_or((0, Vec::new(), Vec::new()));
+                    json!({
+                        "exited": true,
+                        "exitcode": exit_code,
+                        "out-data": STANDARD.encode(stdout),
+                        "err-data": STANDARD.encode(stderr),
+                    })
+                }
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidData, execute)),
+            };
+            self.incoming
+                .push_back(json!({ "return": result }).to_string().into_bytes());
+            Ok(())
+        }
+
+        fn read_message(&mut self) -> io::Result<Vec<u8>> {
+            self.incoming.pop_front().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "scripted response missing")
+            })
+        }
+    }
+
+    fn machine_json() -> Value {
+        json!({
+            "id": "m1",
+            "name": "machine",
+            "state_dir": "/tmp/machine",
+            "backend": "qemu",
+            "state": "running"
+        })
+    }
 
     #[test]
-    fn exposes_only_hardware_plane_contract_tools() {
+    fn exposes_hardware_and_semantic_contract_tools() {
         let tools = tool_definitions();
         let names = tools
             .as_array()
@@ -325,8 +663,123 @@ mod tests {
                 "key",
                 "scroll",
                 "checkpoint_create",
-                "checkpoint_restore"
+                "checkpoint_restore",
+                "ui_tree",
+                "ui_invoke",
+                "ui_set_text",
+                "process_run",
+                "file_import",
+                "file_export"
             ]
         );
+    }
+
+    #[test]
+    fn semantic_tool_schemas_match_snapshot() {
+        let expected: Value = serde_json::from_str(include_str!("../tests/semantic-schema.json"))
+            .expect("semantic schema snapshot is valid JSON");
+        let semantic_names = [
+            "ui_tree",
+            "ui_invoke",
+            "ui_set_text",
+            "process_run",
+            "file_import",
+            "file_export",
+        ];
+        let actual = tool_definitions()
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .filter(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| semantic_names.contains(&name))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(json!(actual), expected);
+    }
+
+    #[tokio::test]
+    async fn semantic_bounds_and_array_types_are_validated_before_guest_connect() {
+        let mcp = McpControlPlane::new("/tmp/winlane-test.sock");
+        let bad_depth = mcp
+            .dispatch(
+                "ui_tree",
+                &json!({"machine": machine_json(), "max_depth": 0}),
+            )
+            .await;
+        assert!(matches!(bad_depth, Err(McpError::InvalidInput(_))));
+        let bad_args = mcp
+            .dispatch(
+                "process_run",
+                &json!({
+                    "machine": machine_json(),
+                    "command": r"C:\Windows\System32\cmd.exe",
+                    "args": ["ok", 2]
+                }),
+            )
+            .await;
+        assert!(matches!(bad_args, Err(McpError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn process_run_uses_guest_exec_and_base64_schema() {
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let transport = MockQgaTransport {
+            incoming: VecDeque::new(),
+            exec_output: Some((0, b"out".to_vec(), b"err".to_vec())),
+            written: Rc::clone(&written),
+        };
+        let mut control = BlockingUiaControl::new(QgaClient::new(transport));
+        let output = execute_semantic_operation(
+            &mut control,
+            SemanticOperation::Run {
+                command: r"C:\Windows\System32\cmd.exe".to_string(),
+                args: vec!["/c".to_string(), "echo ok".to_string()],
+                timeout_ms: 5_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            json!({
+                "exit_code": 0,
+                "stdout_base64": "b3V0",
+                "stderr_base64": "ZXJy"
+            })
+        );
+        let requests = written.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["execute"], "guest-exec");
+        assert_eq!(
+            requests[0]["arguments"]["path"],
+            r"C:\Windows\System32\cmd.exe"
+        );
+        assert_eq!(requests[0]["arguments"]["arg"], json!(["/c", "echo ok"]));
+    }
+
+    #[test]
+    fn bare_process_command_is_rejected_before_transport_writes() {
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let transport = MockQgaTransport {
+            incoming: VecDeque::new(),
+            exec_output: None,
+            written: Rc::clone(&written),
+        };
+        let mut control = BlockingUiaControl::new(QgaClient::new(transport));
+        let result = execute_semantic_operation(
+            &mut control,
+            SemanticOperation::Run {
+                command: "powershell.exe".to_string(),
+                args: Vec::new(),
+                timeout_ms: 5_000,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(winlane_guest::uia::UiaError::InvalidCommandPath)
+        ));
+        assert!(written.borrow().is_empty());
     }
 }
