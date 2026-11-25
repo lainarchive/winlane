@@ -12,6 +12,15 @@ This matrix records what has been visually validated. Detection alone is not val
 
 Runtime detection enables the Kitty graphics protocol for self-identified Ghostty and WezTerm sessions, matching the terminal-identity-based kitty detection. The validation evidence above is exact about the versions actually exercised; other versions are not separate validation claims.
 
+
+## Incremental Kitty rendering negative result
+
+A scratch prototype rendered each frame as independently placed 128-pixel Kitty image tiles. The placement/update/delete semantics were explicit enough to prototype, and WezTerm rendered the tiled output exactly in the Xvfb resize/split harness. Ghostty 1.1.3 repeatedly rendered the initial, font-zoom, and split phases exactly but omitted the final 16-pixel bottom tile row after window resize (512 pixels of the expected 528-pixel height were visible). Because terminal implementations diverged on clipping after resize, tiled Kitty rendering is not enabled.
+
+The experiment was also not a compelling throughput win even before the Ghostty failure: in a synthetic 1024x768 workload where every tile changed at 30 fps, tiled output wrote about 72.8 MB to the terminal in an 8-second measurement versus about 64.9 MB for whole-frame output. Viewer CPU was about 37.9% versus 40.9%, and kitty CPU about 189% versus 208%, but the increased terminal bytes and unproven correctness do not justify the complexity.
+
+The viewer therefore keeps whole-frame Kitty rendering. The only incremental optimization retained is a conservative cropped-viewport skip: when zoomed in, if the exact cropped source pixels are unchanged, the scaled output is necessarily unchanged and no repaint is emitted. This is used only after the captured artifact's SHA-256 validation succeeds; metadata is never trusted without validating artifact bytes.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
