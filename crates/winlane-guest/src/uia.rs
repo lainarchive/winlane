@@ -17,6 +17,29 @@ const CMD_GUEST_PATH: &str = r"C:\Windows\System32\cmd.exe";
 const PROVISIONED_INTERACTIVE_USER: &str = "winlane";
 static INTERACTIVE_TASK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiaView {
+    Control,
+    Raw,
+}
+
+impl UiaView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Raw => "raw",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "control" => Some(Self::Control),
+            "raw" => Some(Self::Raw),
+            _ => None,
+        }
+    }
+}
+
 pub const UIA_HELPER_SCRIPT: &str = r##"
 param(
     [Parameter(Mandatory=$true)][string]$Mode,
@@ -24,7 +47,8 @@ param(
     [string]$TextBase64 = "",
     [string]$OutputPath = "",
     [int]$MaxDepth = 8,
-    [int]$MaxNodes = 2000
+    [int]$MaxNodes = 2000,
+    [ValidateSet("control","raw")][string]$View = "control"
 )
 
 function Write-Result($obj) {
@@ -61,13 +85,18 @@ function Bounds-Array($element) {
     return @([int]$rect.X, [int]$rect.Y, [int]$rect.Width, [int]$rect.Height)
 }
 
+function Uia-Walker {
+    if ($View -eq "raw") { return [System.Windows.Automation.TreeWalker]::RawViewWalker }
+    return [System.Windows.Automation.TreeWalker]::ControlViewWalker
+}
+
 function Convert-Element($element, [int]$depth, [string]$path) {
     if ($script:NodeCount -ge $script:MaxNodeCount) { return $null }
     $script:NodeCount += 1
     $current = $element.Current
     $children = @()
     if ($depth -lt $MaxDepth) {
-        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+        $walker = Uia-Walker
         $child = $walker.GetFirstChild($element)
         $index = 0
         while ($null -ne $child -and $script:NodeCount -lt $script:MaxNodeCount) {
@@ -101,7 +130,7 @@ function Find-ElementByPath([string]$path) {
     if ($path -notmatch '^0(/[0-9]+)*$') { throw "invalid element path" }
     $parts = $path -split '/'
     $current = [System.Windows.Automation.AutomationElement]::RootElement
-    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $walker = Uia-Walker
     for ($partIndex = 1; $partIndex -lt $parts.Count; $partIndex++) {
         $wanted = [int]$parts[$partIndex]
         $child = $walker.GetFirstChild($current)
@@ -120,6 +149,7 @@ if ($Mode -eq "tree") {
     $tree = Convert-Element $root 0 "0"
     Write-Result ([pscustomobject]@{
         ok = $true
+        view = $View
         nodeCount = $script:NodeCount
         truncated = ($script:NodeCount -ge $script:MaxNodeCount)
         root = $tree
@@ -132,19 +162,19 @@ if ($Mode -eq "invoke") {
     $invoke = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     if ($null -ne $invoke) {
         $invoke.Invoke()
-        Write-Result ([pscustomobject]@{ ok = $true; pattern = "invoke" })
+        Write-Result ([pscustomobject]@{ ok = $true; view = $View; pattern = "invoke" })
         exit 0
     }
     $toggle = $element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
     if ($null -ne $toggle) {
         $toggle.Toggle()
-        Write-Result ([pscustomobject]@{ ok = $true; pattern = "toggle" })
+        Write-Result ([pscustomobject]@{ ok = $true; view = $View; pattern = "toggle" })
         exit 0
     }
     $select = $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
     if ($null -ne $select) {
         $select.Select()
-        Write-Result ([pscustomobject]@{ ok = $true; pattern = "selection_item" })
+        Write-Result ([pscustomobject]@{ ok = $true; view = $View; pattern = "selection_item" })
         exit 0
     }
     throw "element has no invoke, toggle, or selection-item pattern"
@@ -156,7 +186,7 @@ if ($Mode -eq "settext") {
     if ($null -eq $value) { throw "element has no value pattern" }
     $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($TextBase64))
     $value.SetValue($text)
-    Write-Result ([pscustomobject]@{ ok = $true; pattern = "value" })
+    Write-Result ([pscustomobject]@{ ok = $true; view = $View; pattern = "value" })
     exit 0
 }
 
@@ -231,7 +261,7 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         })
     }
 
-    pub fn ui_tree(&mut self, max_depth: u16, max_nodes: u32) -> UiaResult<Value> {
+    pub fn ui_tree(&mut self, max_depth: u16, max_nodes: u32, view: UiaView) -> UiaResult<Value> {
         self.install_helper()?;
         let depth = max_depth.to_string();
         let nodes = max_nodes.to_string();
@@ -243,6 +273,8 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
                 depth,
                 "-MaxNodes".to_owned(),
                 nodes,
+                "-View".to_owned(),
+                view.as_str().to_owned(),
             ],
             30_000,
         )?;
@@ -314,7 +346,7 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         })
     }
 
-    pub fn invoke(&mut self, target: &UiNodeRef) -> UiaResult<Value> {
+    pub fn invoke(&mut self, target: &UiNodeRef, view: UiaView) -> UiaResult<Value> {
         validate_element_path(&target.id)?;
         self.install_helper()?;
         self.run_powershell(
@@ -323,13 +355,15 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
                 "invoke".to_owned(),
                 "-Path".to_owned(),
                 target.id.clone(),
+                "-View".to_owned(),
+                view.as_str().to_owned(),
             ],
             15_000,
         )
         .and_then(|capture| parse_helper_json(&capture.stdout))
     }
 
-    pub fn set_text(&mut self, target: &UiNodeRef, text: &str) -> UiaResult<Value> {
+    pub fn set_text(&mut self, target: &UiNodeRef, text: &str, view: UiaView) -> UiaResult<Value> {
         const MAX_TEXT_BYTES: usize = 4096;
         validate_element_path(&target.id)?;
         if text.len() > MAX_TEXT_BYTES {
@@ -344,6 +378,8 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
                 target.id.clone(),
                 "-TextBase64".to_owned(),
                 STANDARD.encode(text.as_bytes()),
+                "-View".to_owned(),
+                view.as_str().to_owned(),
             ],
             15_000,
         )
@@ -701,6 +737,16 @@ mod tests {
         assert!(UIA_HELPER_SCRIPT.contains("InvokePattern"));
         assert!(UIA_HELPER_SCRIPT.contains("ValuePattern"));
         assert!(UIA_HELPER_SCRIPT.contains("ConvertTo-Json"));
+        assert!(UIA_HELPER_SCRIPT.contains("RawViewWalker"));
+        assert!(UIA_HELPER_SCRIPT.contains(r#"[ValidateSet("control","raw")]"#));
+        assert!(UIA_HELPER_SCRIPT.contains("view = $View"));
+    }
+
+    #[test]
+    fn uia_view_parse_is_explicit_and_defaults_are_external() {
+        assert_eq!(UiaView::parse("control"), Some(UiaView::Control));
+        assert_eq!(UiaView::parse("raw"), Some(UiaView::Raw));
+        assert_eq!(UiaView::parse("content"), None);
     }
 
     #[test]
