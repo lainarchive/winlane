@@ -212,7 +212,7 @@ cargo run -p winlane-cli -- mcp \
   --evidence-dir /path/to/evidence
 ```
 
-The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
+The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text. If a tool operation succeeds but evidence recording fails, the MCP result stays successful and carries an explicit `evidence_error` field instead of misreporting the machine operation as failed.
 
 Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node.
 
