@@ -26,6 +26,24 @@ def main():
             print("forced create failure", file=sys.stderr)
             return 1
         return 0
+    if args[0] == "info":
+        target = args[-1]
+        if "failinfo" in target or not os.path.exists(target):
+            print(f"forced info failure: {target}", file=sys.stderr)
+            return 1
+        if "badinfo" in target:
+            print("not json")
+            return 0
+        try:
+            with open(target, encoding="utf-8") as source:
+                metadata = json.load(source)
+        except json.JSONDecodeError:
+            metadata = {"format": "qcow2", "virtual-size": 16 * 1024 * 1024 * 1024}
+        except OSError as error:
+            print(f"invalid fake image metadata: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps({"format": metadata.get("format"), "virtual-size": metadata.get("virtual-size")}))
+        return 0
     if args[0] == "convert":
         source = args[-2]
         target = args[-1]

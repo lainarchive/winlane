@@ -228,6 +228,8 @@ impl QemuBackend {
                     "base image path must be a regular file".to_string(),
                 ));
             }
+            let backing_disk_gb = self.qcow2_virtual_size_gb(&path).await?;
+            stored_spec.disk_gb = stored_spec.disk_gb.max(backing_disk_gb);
             stored_spec.base_image_path = Some(path_to_string(&path)?);
             Some(path)
         } else {
@@ -251,7 +253,7 @@ impl QemuBackend {
         create_machine_state_dir(&state_dir, &spec.name).await?;
         let result = async {
             let disk_path = state_dir.join(DISK_FILE);
-            self.run_qemu_img_create(&disk_path, backing_path.as_deref(), spec.disk_gb)
+            self.run_qemu_img_create(&disk_path, backing_path.as_deref(), stored_spec.disk_gb)
                 .await?;
             set_private_file(&disk_path).await?;
 
@@ -1431,6 +1433,47 @@ impl QemuBackend {
         Err(CoreError::Timeout("swtpm control socket"))
     }
 
+    async fn qcow2_virtual_size_gb(&self, backing_path: &Path) -> CoreResult<u32> {
+        let output = Command::new(&self.qemu_img_binary)
+            .arg("info")
+            .arg("--output=json")
+            .arg(backing_path)
+            .output()
+            .await
+            .map_err(CoreError::io(
+                "run qemu-img info for base image",
+                backing_path,
+            ))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CoreError::Qemu(format!(
+                "qemu-img info exited with {}: {}",
+                output.status,
+                stderr.trim()
+            )));
+        }
+        let info: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            CoreError::Qemu(format!("qemu-img info output was malformed JSON: {error}"))
+        })?;
+        if info.get("format").and_then(Value::as_str) != Some("qcow2") {
+            return Err(CoreError::Qemu(
+                "qemu-img info did not report a qcow2 base image".to_string(),
+            ));
+        }
+        let virtual_size = info
+            .get("virtual-size")
+            .and_then(Value::as_u64)
+            .filter(|size| *size > 0)
+            .ok_or_else(|| {
+                CoreError::Qemu("qemu-img info output missing positive virtual-size".to_string())
+            })?;
+        let gib = 1024_u64 * 1024 * 1024;
+        let size_gb = virtual_size.div_ceil(gib);
+        u32::try_from(size_gb).map_err(|_| {
+            CoreError::Qemu("base image virtual size exceeds supported disk_gb range".to_string())
+        })
+    }
+
     async fn run_qemu_img_create(
         &self,
         disk_path: &Path,
@@ -2485,6 +2528,29 @@ mod tests {
         }
     }
 
+    async fn backend_with_fake_qemu_img(root: &Path) -> QemuBackend {
+        let fake_qemu_img = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/control/fake_qemu_img.py");
+        QemuBackend::new(root)
+            .await
+            .unwrap()
+            .with_qemu_binaries("qemu-system-x86_64", fake_qemu_img)
+    }
+
+    async fn write_fake_base_image(path: &Path, virtual_size: u64) {
+        tokio::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "format": "qcow2",
+                "virtual-size": virtual_size,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
     fn checkpoint_delete_ref(handle: &MachineHandle, id: &str) -> CheckpointRef {
         CheckpointRef {
             id: id.into(),
@@ -2837,6 +2903,75 @@ mod tests {
     fn rejects_overlong_socket_paths() {
         let path = PathBuf::from("/").join("a".repeat(MAX_SOCKET_PATH_BYTES));
         assert!(validate_socket_path(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn base_image_backing_size_raises_default_effective_disk_size() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut backend = backend_with_fake_qemu_img(root.path()).await;
+        let base = root.path().join("base.qcow2");
+        write_fake_base_image(&base, 80_u64 * 1024 * 1024 * 1024).await;
+        let mut spec = checkpoint_delete_spec("builder");
+        spec.disk_gb = 64;
+        spec.base_image_path = Some(base.to_string_lossy().into_owned());
+
+        backend.create_machine(&spec).await.expect("create machine");
+
+        let state_dir = root.path().join("builder");
+        let stored_spec: Value =
+            serde_json::from_slice(&tokio::fs::read(state_dir.join(SPEC_FILE)).await.unwrap())
+                .unwrap();
+        assert_eq!(stored_spec["disk_gb"], 80);
+        let disk: Value =
+            serde_json::from_slice(&tokio::fs::read(state_dir.join(DISK_FILE)).await.unwrap())
+                .unwrap();
+        assert_eq!(disk["size"], "80G");
+    }
+
+    #[tokio::test]
+    async fn larger_explicit_disk_size_survives_smaller_backing_image() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let mut backend = backend_with_fake_qemu_img(root.path()).await;
+        let base = root.path().join("base.qcow2");
+        write_fake_base_image(&base, 80_u64 * 1024 * 1024 * 1024).await;
+        let mut spec = checkpoint_delete_spec("builder");
+        spec.disk_gb = 128;
+        spec.base_image_path = Some(base.to_string_lossy().into_owned());
+
+        backend.create_machine(&spec).await.expect("create machine");
+
+        let state_dir = root.path().join("builder");
+        let stored_spec: Value =
+            serde_json::from_slice(&tokio::fs::read(state_dir.join(SPEC_FILE)).await.unwrap())
+                .unwrap();
+        assert_eq!(stored_spec["disk_gb"], 128);
+        let disk: Value =
+            serde_json::from_slice(&tokio::fs::read(state_dir.join(DISK_FILE)).await.unwrap())
+                .unwrap();
+        assert_eq!(disk["size"], "128G");
+    }
+
+    #[tokio::test]
+    async fn malformed_or_failed_base_image_info_fails_closed() {
+        for (name, expected) in [
+            ("badinfo-base.qcow2", "malformed JSON"),
+            ("failinfo-base.qcow2", "qemu-img info exited"),
+        ] {
+            let root = tempfile::tempdir().expect("temporary root");
+            let mut backend = backend_with_fake_qemu_img(root.path()).await;
+            let base = root.path().join(name);
+            write_fake_base_image(&base, 80_u64 * 1024 * 1024 * 1024).await;
+            let mut spec = checkpoint_delete_spec("builder");
+            spec.disk_gb = 64;
+            spec.base_image_path = Some(base.to_string_lossy().into_owned());
+
+            let error = backend
+                .create_machine(&spec)
+                .await
+                .expect_err("base image info failure must reject creation");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(!root.path().join("builder").exists());
+        }
     }
 
     #[tokio::test]

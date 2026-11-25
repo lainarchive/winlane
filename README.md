@@ -141,7 +141,7 @@ cargo run --release -p winlane-cli -- machine start \
   --machine demo-1
 ```
 
-`machine create` prints one JSON object. Machine lifecycle and view commands accept either `--machine-json "$machine"` or `--machine NAME`. Name resolution asks the control daemon to list machines and fails if the name is absent or ambiguous. Guest commands also accept either form. With `--machine NAME`, they require `--control-socket PATH` for one control-list lookup, then connect directly to the resolved `state_dir/qga.sock` exactly as before.
+`machine create` prints one JSON object. A base-image machine cannot be smaller than its backing image: the effective disk size is the larger of `--disk-gb` and the backing image's virtual size, and the persisted machine spec records that effective size. Machine lifecycle and view commands accept either `--machine-json "$machine"` or `--machine NAME`. Name resolution asks the control daemon to list machines and fails if the name is absent or ambiguous. Guest commands also accept either form. With `--machine NAME`, they require `--control-socket PATH` for one control-list lookup, then connect directly to the resolved `state_dir/qga.sock` exactly as before.
 
 List machines known under the daemon root. The output is one compact JSON array:
 
