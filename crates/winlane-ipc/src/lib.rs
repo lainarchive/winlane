@@ -184,9 +184,14 @@ pub async fn serve_unix_control(
             }
         }
     }
+    let shutdown_result = {
+        let mut backend = backend.lock().await;
+        backend.shutdown_machines().await
+    };
     if tokio::fs::try_exists(socket_path).await? {
         tokio::fs::remove_file(socket_path).await?;
     }
+    shutdown_result?;
     Ok(())
 }
 
