@@ -1,7 +1,14 @@
+use std::cell::RefCell;
+
 use crate::error::{ViewError, ViewResult};
 use crate::viewport::SourceRect;
 
 pub const MAX_FRAME_PIXELS: usize = 33_177_600;
+
+std::thread_local! {
+    static CATMULL_ROM_RESIZER: RefCell<fast_image_resize::Resizer> =
+        RefCell::new(fast_image_resize::Resizer::new());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rgb8 {
@@ -143,7 +150,7 @@ impl Frame {
         Self::new(width, height, pixels)
     }
 
-    pub fn scaled_lanczos3(&self, width: u32, height: u32) -> ViewResult<Self> {
+    pub fn scaled_catmull_rom(&self, width: u32, height: u32) -> ViewResult<Self> {
         if width == self.width && height == self.height {
             return Ok(self.clone());
         }
@@ -171,9 +178,10 @@ impl Frame {
             fast_image_resize::PixelType::U8x3,
         );
         let options = fast_image_resize::ResizeOptions::new().resize_alg(
-            fast_image_resize::ResizeAlg::Convolution(fast_image_resize::FilterType::Lanczos3),
+            fast_image_resize::ResizeAlg::Convolution(fast_image_resize::FilterType::CatmullRom),
         );
-        fast_image_resize::Resizer::new().resize(&source, &mut destination, &options)?;
+        CATMULL_ROM_RESIZER
+            .with_borrow_mut(|resizer| resizer.resize(&source, &mut destination, &options))?;
 
         let bytes = destination.into_vec();
         let mut pixels = Vec::with_capacity(len);
@@ -202,6 +210,40 @@ mod tests {
         assert_eq!(scaled.pixel(1, 0), Some(Rgb8::new(255, 0, 0)));
         assert_eq!(scaled.pixel(2, 0), Some(Rgb8::new(0, 0, 255)));
         assert_eq!(scaled.pixel(3, 0), Some(Rgb8::new(0, 0, 255)));
+    }
+
+    #[test]
+    fn catmull_rom_scaling_supports_odd_and_tiny_dimensions() {
+        let frame = Frame::new(
+            5,
+            7,
+            (0..35)
+                .map(|index| Rgb8::new(index as u8, (index * 3) as u8, (index * 7) as u8))
+                .collect(),
+        )
+        .unwrap();
+        for (width, height) in [(1, 1), (3, 4), (5, 1), (1, 7), (4, 3), (7, 5)] {
+            let scaled = frame.scaled_catmull_rom(width, height).unwrap();
+            assert_eq!((scaled.width(), scaled.height()), (width, height));
+        }
+    }
+
+    #[test]
+    fn catmull_rom_exact_scale_returns_native_pixels() {
+        let frame = Frame::new(
+            3,
+            2,
+            (0..6)
+                .map(|index| Rgb8::new(index as u8, (index * 5) as u8, (index * 11) as u8))
+                .collect(),
+        )
+        .unwrap();
+        let scaled = frame.scaled_catmull_rom(3, 2).unwrap();
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(scaled.pixel(x, y), frame.pixel(x, y));
+            }
+        }
     }
 
     #[test]

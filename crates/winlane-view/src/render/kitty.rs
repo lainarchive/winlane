@@ -9,7 +9,7 @@ const CHUNK_SIZE: usize = 4096;
 
 pub fn render_kitty(frame: &Frame, geometry: TerminalGeometry) -> ViewResult<RenderedOutput> {
     let plan = plan_frame(frame, geometry, OutputSurface::KittyPixels)?;
-    let scaled = frame.scaled_lanczos3(plan.frame_width, plan.frame_height)?;
+    let scaled = frame.scaled_catmull_rom(plan.frame_width, plan.frame_height)?;
     let png = encode_png_rgb(&scaled)?;
     let placement = KittyPlacement::new(plan, geometry);
     let mut output = String::new();

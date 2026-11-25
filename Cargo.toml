@@ -25,7 +25,7 @@ tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net",
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 png = "0.18"
-fast_image_resize = "6"
+fast_image_resize = "=6.1.0"
 winlane-contracts = { path = "crates/winlane-contracts" }
 winlane-core = { path = "crates/winlane-core" }
 winlane-evidence = { path = "crates/winlane-evidence" }
