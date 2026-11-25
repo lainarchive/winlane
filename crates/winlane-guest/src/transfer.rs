@@ -261,17 +261,18 @@ fn write_host_file_to_guest<T: QgaTransport>(
             if count == 0 {
                 break;
             }
+            let next_total = total + count as u64;
+            if next_total > maximum {
+                return Err(UiaError::TransferTooLarge {
+                    actual: next_total,
+                    maximum,
+                });
+            }
             hasher.update(&buffer[..count]);
             control
                 .client_mut()
                 .file_write_chunks(handle, &buffer[..count])?;
-            total += count as u64;
-            if total > maximum {
-                return Err(UiaError::TransferTooLarge {
-                    actual: total,
-                    maximum,
-                });
-            }
+            total = next_total;
         }
         control.client_mut().file_flush(handle)?;
         Ok::<(), UiaError>(())
@@ -296,8 +297,8 @@ fn read_guest_file_to_host<T: QgaTransport>(
     if host_path.exists() && !overwrite {
         return Err(UiaError::DestinationExists);
     }
-    let handle = control.client_mut().file_open(guest_path, "rb")?;
     let mut staging = StagingHostFile::create(host_path, overwrite)?;
+    let handle = control.client_mut().file_open(guest_path, "rb")?;
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let result = (|| {
@@ -1556,6 +1557,105 @@ mod tests {
     fn finish_archive(mut bytes: Vec<u8>) -> Vec<u8> {
         bytes.extend_from_slice(&[0_u8; TAR_BLOCK_BYTES * 2]);
         bytes
+    }
+
+    struct RecordingTransport {
+        incoming: std::collections::VecDeque<Vec<u8>>,
+        written: std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>,
+    }
+
+    impl QgaTransport for RecordingTransport {
+        fn write_raw(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_message(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            let request: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            self.written.borrow_mut().push(request.clone());
+            let execute = request["execute"].as_str().unwrap_or_default();
+            let result = match execute {
+                "guest-file-open" => serde_json::json!(1),
+                "guest-file-write" | "guest-file-flush" | "guest-file-close" => {
+                    serde_json::json!({})
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unexpected request {execute}"),
+                    ));
+                }
+            };
+            self.incoming.push_back(
+                serde_json::json!({ "return": result })
+                    .to_string()
+                    .into_bytes(),
+            );
+            Ok(())
+        }
+
+        fn read_message(&mut self) -> std::io::Result<Vec<u8>> {
+            self.incoming.pop_front().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "missing response")
+            })
+        }
+    }
+
+    fn recording_control() -> (
+        BlockingUiaControl<RecordingTransport>,
+        std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>,
+    ) {
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let transport = RecordingTransport {
+            incoming: std::collections::VecDeque::new(),
+            written: std::rc::Rc::clone(&written),
+        };
+        (
+            BlockingUiaControl::new(crate::qga::QgaClient::new(transport)),
+            written,
+        )
+    }
+
+    #[test]
+    fn export_staging_failure_does_not_open_guest_file() {
+        let temp = TestTempDir::new();
+        let parent_file = temp.path.join("parent-file");
+        fs::write(&parent_file, b"not a directory").unwrap();
+        let target = parent_file.join("payload.bin");
+        let (mut control, written) = recording_control();
+        let result = read_guest_file_to_host(
+            &mut control,
+            r"C:\winlane-validation\payload.bin",
+            &target,
+            false,
+            1024,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(written.borrow().is_empty());
+    }
+
+    #[test]
+    fn growing_host_file_is_rejected_before_writing_beyond_cap() {
+        let (mut control, written) = recording_control();
+        let result = write_host_file_to_guest(
+            &mut control,
+            Path::new("/proc/version"),
+            r"C:\winlane-validation\payload.bin",
+            4,
+        );
+        assert!(matches!(result, Err(UiaError::TransferTooLarge { .. })));
+        let requests = written.borrow();
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request["execute"] == "guest-file-write")
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["execute"] == "guest-file-close")
+        );
     }
 
     #[test]
