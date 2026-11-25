@@ -22,9 +22,6 @@ fn environment_fixture(name: &str) -> TerminalEnvironment {
         match key {
             "TERM" => environment.term = Some(value.to_owned()),
             "TERM_PROGRAM" => environment.term_program = Some(value.to_owned()),
-            "TERM_PROGRAM_VERSION" => {
-                environment.term_program_version = Some(value.to_owned());
-            }
             "COLORTERM" => environment.colorterm = Some(value.to_owned()),
             "KITTY_WINDOW_ID" => environment.kitty_window_id = Some(value.to_owned()),
             "TMUX" => environment.tmux = Some(value.to_owned()),
@@ -66,14 +63,14 @@ fn tmux_detection_conservatively_falls_back_to_blocks() {
 }
 
 #[test]
-fn iterm2_detection_uses_kitty_graphics() {
+fn iterm2_detection_conservatively_avoids_kitty_graphics() {
     assert_detection_fixture(
         "iterm2.env",
         include_bytes!("../../../tests/fixtures/terminal/golden/iterm2-detection.golden"),
     );
     let capabilities = detect_capabilities(&environment_fixture("iterm2.env"));
-    assert_eq!(capabilities.protocol, GraphicsProtocol::Kitty);
-    assert!(capabilities.renderer_is_supported());
+    assert_eq!(capabilities.protocol, GraphicsProtocol::ITerm2);
+    assert!(!capabilities.renderer_is_supported());
 }
 
 #[test]

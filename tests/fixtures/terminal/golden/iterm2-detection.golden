@@ -1,4 +1,4 @@
-protocol=kitty
+protocol=iterm2
 source=iTerm2 TERM_PROGRAM
 truecolor=true
 tmux=false

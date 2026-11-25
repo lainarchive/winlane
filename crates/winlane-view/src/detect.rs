@@ -76,7 +76,6 @@ impl DetectionSource {
 pub struct TerminalEnvironment {
     pub term: Option<String>,
     pub term_program: Option<String>,
-    pub term_program_version: Option<String>,
     pub colorterm: Option<String>,
     pub kitty_window_id: Option<String>,
     pub tmux: Option<String>,
@@ -87,7 +86,6 @@ impl TerminalEnvironment {
         Self {
             term: env::var("TERM").ok(),
             term_program: env::var("TERM_PROGRAM").ok(),
-            term_program_version: env::var("TERM_PROGRAM_VERSION").ok(),
             colorterm: env::var("COLORTERM").ok(),
             kitty_window_id: env::var("KITTY_WINDOW_ID").ok(),
             tmux: env::var("TMUX").ok(),
@@ -165,7 +163,7 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "ghostty" {
         return capabilities(
-            GraphicsProtocol::Kitty,
+            GraphicsProtocol::HalfBlock,
             DetectionSource::Ghostty,
             truecolor,
             tmux,
@@ -173,19 +171,19 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
     }
     if term_program == "wezterm" {
         return capabilities(
-            GraphicsProtocol::Kitty,
+            GraphicsProtocol::HalfBlock,
             DetectionSource::WezTerm,
             truecolor,
             tmux,
         );
     }
     if term_program == "iterm.app" {
-        let protocol = if iterm_supports_kitty(environment.term_program_version.as_deref()) {
-            GraphicsProtocol::Kitty
-        } else {
-            GraphicsProtocol::ITerm2
-        };
-        return capabilities(protocol, DetectionSource::ITerm2, truecolor, tmux);
+        return capabilities(
+            GraphicsProtocol::ITerm2,
+            DetectionSource::ITerm2,
+            truecolor,
+            tmux,
+        );
     }
     if term.contains("sixel") || term_program == "mlterm" {
         return capabilities(
@@ -202,29 +200,6 @@ pub fn detect_capabilities(environment: &TerminalEnvironment) -> TerminalCapabil
         DetectionSource::DefaultFallback
     };
     capabilities(GraphicsProtocol::HalfBlock, source, truecolor, tmux)
-}
-
-fn iterm_supports_kitty(version: Option<&str>) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let mut parts = version.split('.');
-    let Some(major) = parts.next().and_then(parse_numeric_prefix) else {
-        return false;
-    };
-    let Some(minor) = parts.next().and_then(parse_numeric_prefix) else {
-        return false;
-    };
-    let patch = parts.next().and_then(parse_numeric_prefix).unwrap_or(0);
-    major > 3 || (major == 3 && (minor > 5 || (minor == 5 && patch >= 4)))
-}
-
-fn parse_numeric_prefix(part: &str) -> Option<u32> {
-    let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.parse().ok()
 }
 
 fn capabilities(
@@ -251,9 +226,6 @@ mod tests {
             match *key {
                 "TERM" => environment.term = Some((*value).to_owned()),
                 "TERM_PROGRAM" => environment.term_program = Some((*value).to_owned()),
-                "TERM_PROGRAM_VERSION" => {
-                    environment.term_program_version = Some((*value).to_owned());
-                }
                 "COLORTERM" => environment.colorterm = Some((*value).to_owned()),
                 "KITTY_WINDOW_ID" => environment.kitty_window_id = Some((*value).to_owned()),
                 "TMUX" => environment.tmux = Some((*value).to_owned()),
@@ -283,32 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_uses_kitty_graphics() {
+    fn ghostty_conservatively_uses_half_block_until_validated() {
         let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "ghostty")]));
-        assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
+        assert_eq!(detected.protocol, GraphicsProtocol::HalfBlock);
         assert_eq!(detected.source, DetectionSource::Ghostty);
     }
 
     #[test]
-    fn iterm_354_uses_kitty_graphics() {
-        let detected = detect_capabilities(&env(&[
-            ("TERM_PROGRAM", "iTerm.app"),
-            ("TERM_PROGRAM_VERSION", "3.5.4beta2"),
-        ]));
-        assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
+    fn iterm_conservatively_uses_unsupported_iterm_detection_until_validated() {
+        let detected = detect_capabilities(&env(&[("TERM_PROGRAM", "iTerm.app")]));
+        assert_eq!(detected.protocol, GraphicsProtocol::ITerm2);
         assert_eq!(detected.source, DetectionSource::ITerm2);
-        assert!(detected.renderer_is_supported());
-    }
-
-    #[test]
-    fn old_or_unknown_iterm_conservatively_uses_unsupported_iterm_detection() {
-        for version in [Some("3.4.23"), Some("3.5.0"), Some("3.5.3"), None] {
-            let mut environment = env(&[("TERM_PROGRAM", "iTerm.app")]);
-            environment.term_program_version = version.map(str::to_owned);
-            let detected = detect_capabilities(&environment);
-            assert_eq!(detected.protocol, GraphicsProtocol::ITerm2);
-            assert!(!detected.renderer_is_supported());
-        }
+        assert!(!detected.renderer_is_supported());
     }
 
     #[test]
@@ -355,15 +313,12 @@ mod tests {
                 true,
             ),
             (
-                "iterm2 kitty graphics",
-                vec![
-                    ("TERM_PROGRAM", "iTerm.app"),
-                    ("TERM_PROGRAM_VERSION", "3.5.4"),
-                ],
-                GraphicsProtocol::Kitty,
+                "iterm2 conservative unsupported detection",
+                vec![("TERM_PROGRAM", "iTerm.app")],
+                GraphicsProtocol::ITerm2,
                 DetectionSource::ITerm2,
                 false,
-                true,
+                false,
             ),
             (
                 "sixel TERM detected unsupported",

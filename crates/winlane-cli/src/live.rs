@@ -59,8 +59,34 @@ pub struct CapturedFrame {
     pub sha256: String,
 }
 
-/// Captures one transient live-view artifact. The artifact belongs to this
-/// capture call and is removed after the decode attempt, including failures.
+struct TransientFrameCleanup {
+    path: Option<PathBuf>,
+}
+
+impl TransientFrameCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    async fn cleanup(mut self) -> io::Result<()> {
+        if let Some(path) = self.path.take() {
+            tokio::fs::remove_file(path).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TransientFrameCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Captures one transient live-view artifact. The artifact becomes owned by
+/// this capture call and is removed after the decode attempt, including
+/// failures and cancellation after the path is known.
 pub async fn capture_transient_frame(
     client: &UnixControlClient,
     machine: &MachineHandle,
@@ -70,10 +96,11 @@ pub async fn capture_transient_frame(
             machine: machine.clone(),
         })
         .await?;
-    let blob_path = result
+    let cleanup = result
         .get("blob_path")
         .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from);
+        .map(PathBuf::from)
+        .map(TransientFrameCleanup::new);
     let metadata_result = serde_json::from_value::<FrameRef>(result);
     let mut outcome = match metadata_result {
         Ok(metadata) => match tokio::fs::read(&metadata.blob_path).await {
@@ -87,8 +114,8 @@ pub async fn capture_transient_frame(
         },
         Err(error) => Err(error.into()),
     };
-    if let Some(blob_path) = blob_path
-        && let Err(error) = tokio::fs::remove_file(blob_path).await
+    if let Some(cleanup) = cleanup
+        && let Err(error) = cleanup.cleanup().await
         && outcome.is_ok()
     {
         outcome = Err(error.into());
@@ -126,28 +153,52 @@ fn fallback_view_rows(rows: u16, fallback: bool) -> u16 {
     if fallback && rows > 1 { rows - 1 } else { rows }
 }
 
-pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
-    let capabilities = detect_capabilities(&TerminalEnvironment::capture());
-    let protocol = capabilities.protocol;
-    let client = UnixControlClient::new(config.control_socket);
-    let _terminal = TerminalSession::enter()?;
-    let window_size = terminal::window_size()?;
-    let full_geometry =
-        terminal_geometry(&window_size, config.cell_width_px, config.cell_height_px)?;
-    let fallback = protocol != winlane_view::GraphicsProtocol::Kitty;
+fn geometry_from_window_size(
+    size: &terminal::WindowSize,
+    fallback_cell_width: u16,
+    fallback_cell_height: u16,
+    fallback: bool,
+) -> winlane_view::ViewResult<(TerminalGeometry, u16, u16)> {
+    let full_geometry = terminal_geometry(size, fallback_cell_width, fallback_cell_height)?;
     let geometry = TerminalGeometry::new(
         full_geometry.cols,
         fallback_view_rows(full_geometry.rows, fallback),
         full_geometry.cell_width_px,
         full_geometry.cell_height_px,
     )?;
+    Ok((geometry, full_geometry.cols, full_geometry.rows))
+}
+
+fn read_live_geometry(
+    fallback_cell_width: u16,
+    fallback_cell_height: u16,
+    fallback: bool,
+) -> CliResult<(TerminalGeometry, u16, u16)> {
+    Ok(geometry_from_window_size(
+        &terminal::window_size()?,
+        fallback_cell_width,
+        fallback_cell_height,
+        fallback,
+    )?)
+}
+
+pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
+    let capabilities = detect_capabilities(&TerminalEnvironment::capture());
+    let protocol = capabilities.protocol;
+    let client = UnixControlClient::new(config.control_socket);
+    let _terminal = TerminalSession::enter()?;
+    let fallback = protocol != winlane_view::GraphicsProtocol::Kitty;
+    let fallback_cell_width = config.cell_width_px;
+    let fallback_cell_height = config.cell_height_px;
+    let (geometry, terminal_cols, terminal_rows) =
+        read_live_geometry(fallback_cell_width, fallback_cell_height, fallback)?;
     let mut session = LiveSession::new(
         client,
         config.machine,
         geometry,
-        full_geometry.cols,
-        full_geometry.rows,
+        (terminal_cols, terminal_rows),
         fallback,
+        (fallback_cell_width, fallback_cell_height),
         config.zoom_percent,
     )?;
     let mut last_frame: Option<DisplayedFrame> = None;
@@ -202,6 +253,8 @@ struct LiveSession {
     terminal_cols: u16,
     terminal_rows: u16,
     fallback: bool,
+    fallback_cell_width: u16,
+    fallback_cell_height: u16,
 }
 
 impl LiveSession {
@@ -209,9 +262,9 @@ impl LiveSession {
         client: UnixControlClient,
         machine: MachineHandle,
         geometry: TerminalGeometry,
-        terminal_cols: u16,
-        terminal_rows: u16,
+        terminal_size: (u16, u16),
         fallback: bool,
+        cell_fallbacks: (u16, u16),
         zoom_percent: u16,
     ) -> winlane_view::ViewResult<Self> {
         Ok(Self {
@@ -221,9 +274,11 @@ impl LiveSession {
             zoom: ZoomViewport::new(zoom_percent)?,
             detach: DetachGuard::default(),
             stdout: io::stdout(),
-            terminal_cols,
-            terminal_rows,
+            terminal_cols: terminal_size.0,
+            terminal_rows: terminal_size.1,
             fallback,
+            fallback_cell_width: cell_fallbacks.0,
+            fallback_cell_height: cell_fallbacks.1,
         })
     }
 
@@ -275,10 +330,14 @@ impl LiveSession {
             }
             Event::Resize(cols, rows) => {
                 if cols != 0 && rows != 0 {
-                    self.terminal_cols = cols;
-                    self.terminal_rows = rows;
-                    self.viewport
-                        .resize(cols, fallback_view_rows(rows, self.fallback))?;
+                    let (geometry, measured_cols, measured_rows) = read_live_geometry(
+                        self.fallback_cell_width,
+                        self.fallback_cell_height,
+                        self.fallback,
+                    )?;
+                    self.terminal_cols = measured_cols;
+                    self.terminal_rows = measured_rows;
+                    self.viewport.resize_geometry(geometry)?;
                     execute!(&mut self.stdout, terminal::Clear(ClearType::All))?;
                 }
             }
@@ -536,6 +595,15 @@ mod tests {
         assert_eq!(translate_key_event(event), None);
     }
 
+    #[test]
+    fn transient_cleanup_drop_removes_owned_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("frame.ppm");
+        std::fs::write(&path, b"frame").unwrap();
+        drop(TransientFrameCleanup::new(path.clone()));
+        assert!(!path.exists());
+    }
+
     fn input_context() -> InputMappingContext {
         let geometry = TerminalGeometry::cells(4, 2).unwrap();
         let plan =
@@ -607,6 +675,20 @@ mod tests {
         let geometry = terminal_geometry(&size, 9, 17).unwrap();
         assert_eq!(geometry.cell_width_px, 9);
         assert_eq!(geometry.cell_height_px, 17);
+    }
+
+    #[test]
+    fn live_geometry_reflects_font_zoom_cell_pixel_changes() {
+        let zoomed = terminal::WindowSize {
+            rows: 10,
+            columns: 40,
+            width: 800,
+            height: 400,
+        };
+        let (geometry, cols, rows) = geometry_from_window_size(&zoomed, 8, 16, false).unwrap();
+        assert_eq!((cols, rows), (40, 10));
+        assert_eq!((geometry.cols, geometry.rows), (40, 10));
+        assert_eq!((geometry.cell_width_px, geometry.cell_height_px), (20, 40));
     }
 
     #[test]

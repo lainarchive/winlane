@@ -770,7 +770,7 @@ impl QemuBackend {
         let qmp = self.qmp_for_machine(machine).await?;
         let frame_dir = PathBuf::from(&record.handle.state_dir).join(FRAME_DIR);
         create_private_dir(&frame_dir, "create frame directory").await?;
-        let frame_path = frame_dir.join(format!("frame-{}.ppm", unix_ms()));
+        let frame_path = frame_dir.join(format!("frame-{}-{}.ppm", unix_ms(), Uuid::new_v4()));
         let frame_path_string = path_to_string(&frame_path)?;
         qmp.execute("screendump", Some(json!({ "filename": frame_path_string })))
             .await?;

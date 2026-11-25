@@ -71,7 +71,7 @@ Host:
 - OVMF UEFI firmware
 - swtpm
 - Rust stable, using the repository toolchain file
-- a terminal implementing the Kitty graphics protocol for high-resolution viewing (kitty is the validated path; Ghostty, WezTerm, and iTerm2 3.5.4+ implement the protocol but are not independently validated here; iTerm2 versions below 3.5.4 or unknown versions use the fallback), or any truecolor terminal for the half-block preview fallback
+- kitty for the validated Kitty-graphics high-resolution path, or any truecolor terminal for the half-block preview fallback; Ghostty, WezTerm, iTerm2, tmux, and sixel currently use conservative fallback behavior until independently validated
 
 Guest media:
 
