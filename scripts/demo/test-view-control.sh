@@ -25,4 +25,21 @@ for _ in {1..100}; do [[ -f ${view_state}.stopped ]] && break; sleep 0.05; done
 wait "$stopper"
 [[ $(cat "$root/order") == machine-stop ]]
 ! pgrep -f "$root/fake-view" >/dev/null
+repeat_start=$SECONDS
+stop_view
+(( SECONDS - repeat_start < 2 ))
+cat >"$root/tree-absent.json" <<'EOF'
+{"ok":true,"truncated":false,"root":{"id":"0","children":[]}}
+EOF
+[[ -z $(python3 scripts/demo/find_notepad_popup_button.py "$root/tree-absent.json") ]]
+cat >"$root/tree-truncated.json" <<'EOF'
+{"ok":true,"truncated":true,"root":{"id":"0","children":[]}}
+EOF
+if python3 scripts/demo/find_notepad_popup_button.py "$root/tree-truncated.json" >/dev/null 2>&1; then
+  exit 1
+fi
+cat >"$root/tree-popup.json" <<'EOF'
+{"ok":true,"truncated":false,"root":{"id":"0","children":[{"id":"0/1","name":"Got it","controlType":"Button","children":[]}]}}
+EOF
+[[ $(python3 scripts/demo/find_notepad_popup_button.py "$root/tree-popup.json") == '0/1' ]]
 printf 'view control stop/ack regression passed\n'

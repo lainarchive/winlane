@@ -144,6 +144,9 @@ start_view() {
 
 stop_view() {
   if [[ -n $view_state ]]; then
+    if [[ -f ${view_state}.stopped && $(cat "$view_state" 2>/dev/null || true) == 0 ]]; then
+      return 0
+    fi
     rm -f -- "${view_state}.stopped"
     atomic_write "$view_state" 0
     for _ in {1..100}; do
@@ -224,40 +227,45 @@ write_notepad_text() {
 
 dismiss_notepad_first_run_popup() {
   local tree_file="$work_dir/ui-tree-popup.json"
-  local tree_args node_line node runtime_id invoke_args
+  local tree_args node invoke_args absent_checks=0 invoked=0
   tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     if ! mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_file"; then
+      absent_checks=0
       sleep 2
       continue
     fi
     printf '\n$ python3 %q %q\n' "$demo_dir/find_notepad_popup_button.py" "$tree_file" >&2
-    node_line=$(python3 "$demo_dir/find_notepad_popup_button.py" "$tree_file")
-    if [[ -z $node_line ]]; then
-      printf 'Notepad first-run popup absent or already dismissed\n'
-      return 0
+    if ! node=$(python3 "$demo_dir/find_notepad_popup_button.py" "$tree_file"); then
+      absent_checks=0
+      sleep 1
+      continue
     fi
-    IFS=$'\t' read -r node runtime_id <<<"$node_line"
-    if ! valid_node_ref "$node" || ! valid_runtime_id "$runtime_id"; then
+    if [[ -z $node ]]; then
+      absent_checks=$((absent_checks + 1))
+      if (( absent_checks >= 2 )); then
+        if (( invoked )); then
+          printf 'Notepad first-run popup dismissed and verified absent\n'
+        else
+          printf 'Notepad first-run popup absent or already dismissed\n'
+        fi
+        return 0
+      fi
+      sleep 1
+      continue
+    fi
+    absent_checks=0
+    if ! valid_node_ref "$node"; then
       echo "drive-demo error: invalid popup node reference" >&2
       return 1
     fi
-    if [[ -n $runtime_id ]]; then
-      invoke_args=$(printf '{"machine":"%s","node":"%s","runtime_id":"%s","timeout_ms":30000}' \
-        "$machine_name" "$node" "$runtime_id")
-    else
-      invoke_args=$(printf '{"machine":"%s","node":"%s","timeout_ms":30000}' "$machine_name" "$node")
-    fi
+    invoke_args=$(printf '{"machine":"%s","node":"%s","timeout_ms":30000}' "$machine_name" "$node")
     if ! mcp_call --timeout-seconds 45 --arguments "$invoke_args" ui_invoke; then
-      echo 'drive-demo error: failed to invoke Notepad first-run dismissal button' >&2
-      return 1
+      sleep 1
+      continue
     fi
+    invoked=1
     sleep 1
-    if mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_file" \
-      && [[ -z $(python3 "$demo_dir/find_notepad_popup_button.py" "$tree_file") ]]; then
-      printf 'Notepad first-run popup dismissed and verified absent\n'
-      return 0
-    fi
   done
   echo 'drive-demo error: Notepad first-run popup remained present after dismissal attempts' >&2
   return 1

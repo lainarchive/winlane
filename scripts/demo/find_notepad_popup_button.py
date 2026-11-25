@@ -19,12 +19,14 @@ def main():
         tree = json.load(source)
     if not tree.get("ok") or not isinstance(tree.get("root"), dict):
         raise SystemExit(2)
+    if tree.get("truncated"):
+        raise SystemExit(3)
     for node in walk(tree["root"]):
         name = str(node.get("name") or "").strip().lower()
         if node.get("controlType") == "Button" and name == "got it":
             path = node.get("id")
             if isinstance(path, str) and path:
-                print(f"{path}\t{node.get('runtimeId') or ''}")
+                print(path)
                 return
 
 

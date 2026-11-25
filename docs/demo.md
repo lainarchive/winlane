@@ -66,7 +66,7 @@ Outputs:
 - `ffmpeg.log`, `kitty.log`, `xvfb.log`, and `daemon.log`
 - `evidence-export/`
 
-The MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden.
+Once recording has started, the MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden. If the driver fails before interactive-desktop readiness, recording never starts and those capture artifacts do not exist.
 
 ## Caveats
 
