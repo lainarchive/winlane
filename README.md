@@ -40,12 +40,15 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - pointer movement reached the Windows desktop and produced visible cursor/tooltip state
 - MCP initialization and tool discovery exposed lifecycle, hardware, semantic, process, and file tools
 - MCP machine create/start, UI tree read, process execution, file round trips, stop, checkpoint restore, and destroy passed against a live Windows machine
+- MCP `ui_invoke` invoked a real Notepad `Got it` button and the control disappeared from the next UI tree
+- MCP `ui_set_text` wrote `semantic proof` into the real Notepad document; independent ValuePattern and TextPattern reads matched exactly
+- a stopped-machine checkpoint restore followed by start reached a responsive guest agent and returned a real 57-node UI tree
 - paced keyboard input typed a 72-character lowercase alphanumeric Notepad string exactly
-- MCP evidence sequences stayed contiguous, redacted sensitive process arguments, and content-addressed large output blobs
+- MCP evidence sequences stayed contiguous, redacted sensitive process arguments and typed text, and content-addressed large output blobs
 
 Not yet proven end-to-end:
 
-- MCP `ui_invoke` and `ui_set_text`; both are implemented, but only direct guest invocation is live-proven
+- UI tree coverage for controls visible only through the raw UI Automation view; the helper currently walks the control view
 - keyboard input beyond lowercase alphanumeric text; input is currently paced at roughly 25 characters per second
 - checkpoint consistency while firmware or TPM state is actively changing
 - terminal input behavior across a matrix of real terminal emulators
@@ -198,7 +201,7 @@ cargo run -p winlane-cli -- mcp \
 
 The hardware-plane MCP tools cover machine creation, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
 
-Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers UI tree read, process execution, and file round trips; use the guest CLI for invoke and set-text until those MCP calls are proven end-to-end.
+Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node.
 
 Export or inspect evidence. Export writes `events.jsonl` plus the content-addressed `blobs/` directory:
 
