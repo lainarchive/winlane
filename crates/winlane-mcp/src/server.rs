@@ -175,6 +175,7 @@ fn tool_uses_machine(tool: &str) -> bool {
             | "machine_status"
             | "machine_start"
             | "machine_stop"
+            | "machine_wait"
             | "screenshot"
             | "click"
             | "move"

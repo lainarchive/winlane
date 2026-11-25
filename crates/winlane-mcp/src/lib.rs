@@ -76,6 +76,10 @@ impl McpControlPlane {
                 let machine = self.machine_input(input).await?;
                 self.machine_stop(machine).await
             }
+            "machine_wait" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_wait(machine, input).await
+            }
             "screenshot" => {
                 let machine = self.machine_input(input).await?;
                 self.screenshot(machine).await
@@ -200,6 +204,45 @@ impl McpControlPlane {
             .client
             .invoke(&ControlRequest::Stop { machine })
             .await?)
+    }
+
+    pub async fn machine_wait(&self, machine: MachineHandle, input: &Value) -> McpResult<Value> {
+        if required_string(input, "for")? != "guest-agent" {
+            return Err(McpError::InvalidInput(
+                "for must be guest-agent".to_string(),
+            ));
+        }
+        let timeout_seconds = optional_bounded_u64(input, "timeout_seconds", 60, 1, 600)?;
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(timeout_seconds);
+        loop {
+            let probe = self
+                .client
+                .invoke(&ControlRequest::GuestAgentReady {
+                    machine: machine.clone(),
+                })
+                .await?;
+            let state = probe.get("state").cloned().unwrap_or(Value::Null);
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            if probe.get("ready").and_then(Value::as_bool) == Some(true) {
+                return Ok(json!({
+                    "ready": true,
+                    "for": "guest-agent",
+                    "state": state,
+                    "elapsed_ms": elapsed_ms,
+                }));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(json!({
+                    "ready": false,
+                    "for": "guest-agent",
+                    "state": state,
+                    "elapsed_ms": elapsed_ms,
+                    "error": "timeout",
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     pub async fn screenshot(&self, machine: MachineHandle) -> McpResult<Value> {
@@ -594,6 +637,15 @@ pub fn tool_definitions() -> Value {
         {"name": "machine_status", "description": "Read machine state", "inputSchema": machine_only},
         {"name": "machine_start", "description": "Start an existing machine", "inputSchema": machine_only},
         {"name": "machine_stop", "description": "Stop a running machine", "inputSchema": machine_only},
+        {"name": "machine_wait", "description": "Wait for guest agent readiness with a bounded timeout", "inputSchema": {
+            "type": "object",
+            "properties": {
+                "machine": machine_ref,
+                "for": {"type": "string", "enum": ["guest-agent"]},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "default": 60}
+            },
+            "required": ["machine", "for"]
+        }},
         {"name": "screenshot", "description": "Capture a full-resolution frame", "inputSchema": machine_only},
         {"name": "click", "description": "Click guest pixel coordinates", "inputSchema": {
             "type": "object",
@@ -900,6 +952,7 @@ mod tests {
                 "machine_status",
                 "machine_start",
                 "machine_stop",
+                "machine_wait",
                 "screenshot",
                 "click",
                 "move",
@@ -916,6 +969,43 @@ mod tests {
                 "file_export"
             ]
         );
+        let wait = tools
+            .as_array()
+            .expect("tool definitions are an array")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("machine_wait"))
+            .expect("machine_wait schema");
+        assert_eq!(
+            wait.pointer("/inputSchema/properties/for/enum"),
+            Some(&json!(["guest-agent"]))
+        );
+        assert_eq!(
+            wait.pointer("/inputSchema/properties/timeout_seconds/minimum"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            wait.pointer("/inputSchema/properties/timeout_seconds/maximum"),
+            Some(&json!(600))
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_wait_rejects_other_wait_kinds_before_control_connect() {
+        let mcp = McpControlPlane::new("/tmp/winlane-test.sock");
+        let result = mcp
+            .dispatch(
+                "machine_wait",
+                &json!({"machine": machine_json(), "for": "boot"}),
+            )
+            .await;
+        assert!(matches!(result, Err(McpError::InvalidInput(_))));
+        let bad_timeout = mcp
+            .dispatch(
+                "machine_wait",
+                &json!({"machine": machine_json(), "for": "guest-agent", "timeout_seconds": 0}),
+            )
+            .await;
+        assert!(matches!(bad_timeout, Err(McpError::InvalidInput(_))));
     }
 
     #[test]
