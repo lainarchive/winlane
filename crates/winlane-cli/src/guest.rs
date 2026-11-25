@@ -11,15 +11,27 @@ use winlane_guest::uia::BlockingUiaControl;
 use crate::CliError;
 use crate::CliResult;
 use crate::args::GuestCommand;
-use crate::machine::write_json_line;
+use crate::machine::{resolve_machine, write_json_line};
 
 pub async fn run_guest_command(command: &GuestCommand, output: &mut impl Write) -> CliResult<()> {
     let operation = guest_operation(command)?;
-    let machine_json = command.machine_json().to_string();
+    let machine_json = guest_machine_json(command.machine()).await?;
     let result =
         tokio::task::spawn_blocking(move || execute_guest_operation(&machine_json, operation))
             .await??;
     write_json_line(output, &result)
+}
+
+async fn guest_machine_json(machine: &crate::args::GuestMachineArgs) -> CliResult<String> {
+    if let Some(machine_json) = &machine.machine_json {
+        return Ok(machine_json.clone());
+    }
+    let control_socket = machine.control_socket.as_deref().ok_or_else(|| {
+        CliError::Usage("--control-socket is required with --machine".to_string())
+    })?;
+    let resolved =
+        resolve_machine(control_socket, &machine.machine_json, &machine.machine_name).await?;
+    Ok(serde_json::to_string(&resolved)?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

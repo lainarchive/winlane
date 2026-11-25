@@ -5,7 +5,7 @@ use winlane_contracts::{BootMode, NetworkMode};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]\n       winlane guest invoke --machine-json JSON --node PATH\n       winlane guest set-text --machine-json JSON --node PATH --text TEXT\n       winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import --machine-json JSON --host-path PATH --guest-path PATH\n       winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
@@ -17,16 +17,12 @@ pub const EVIDENCE_EXPORT_USAGE: &str =
     "usage: winlane evidence export --evidence-dir PATH --output PATH";
 pub const EVIDENCE_TAIL_USAGE: &str =
     "usage: winlane evidence tail --evidence-dir PATH [--limit N]";
-pub const GUEST_UI_TREE_USAGE: &str =
-    "usage: winlane guest ui-tree --machine-json JSON [--max-depth N] [--max-nodes N]";
-pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke --machine-json JSON --node PATH";
-pub const GUEST_SET_TEXT_USAGE: &str =
-    "usage: winlane guest set-text --machine-json JSON --node PATH --text TEXT";
-pub const GUEST_RUN_USAGE: &str = "usage: winlane guest run --machine-json JSON --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]";
-pub const GUEST_IMPORT_USAGE: &str =
-    "usage: winlane guest import --machine-json JSON --host-path PATH --guest-path PATH";
-pub const GUEST_EXPORT_USAGE: &str =
-    "usage: winlane guest export --machine-json JSON --guest-path PATH --host-path PATH";
+pub const GUEST_UI_TREE_USAGE: &str = "usage: winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N]";
+pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH";
+pub const GUEST_SET_TEXT_USAGE: &str = "usage: winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT";
+pub const GUEST_RUN_USAGE: &str = "usage: winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]";
+pub const GUEST_IMPORT_USAGE: &str = "usage: winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH";
+pub const GUEST_EXPORT_USAGE: &str = "usage: winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewArgs {
@@ -96,28 +92,35 @@ pub struct McpArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestMachineArgs {
+    pub control_socket: Option<PathBuf>,
+    pub machine_json: Option<String>,
+    pub machine_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestUiTreeArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub max_depth: u16,
     pub max_nodes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestInvokeArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub node: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSetTextArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub node: String,
     pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestRunArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub command: String,
     pub args: Vec<String>,
     pub timeout_ms: u64,
@@ -125,14 +128,14 @@ pub struct GuestRunArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestImportArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub host_path: PathBuf,
     pub guest_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestExportArgs {
-    pub machine_json: String,
+    pub machine: GuestMachineArgs,
     pub guest_path: String,
     pub host_path: PathBuf,
 }
@@ -148,14 +151,14 @@ pub enum GuestCommand {
 }
 
 impl GuestCommand {
-    pub fn machine_json(&self) -> &str {
+    pub fn machine(&self) -> &GuestMachineArgs {
         match self {
-            Self::UiTree(args) => &args.machine_json,
-            Self::Invoke(args) => &args.machine_json,
-            Self::SetText(args) => &args.machine_json,
-            Self::Run(args) => &args.machine_json,
-            Self::Import(args) => &args.machine_json,
-            Self::Export(args) => &args.machine_json,
+            Self::UiTree(args) => &args.machine,
+            Self::Invoke(args) => &args.machine,
+            Self::SetText(args) => &args.machine,
+            Self::Run(args) => &args.machine,
+            Self::Import(args) => &args.machine,
+            Self::Export(args) => &args.machine,
         }
     }
 }
@@ -560,7 +563,13 @@ fn parse_guest_ui_tree_args(args: &[String]) -> Result<GuestUiTreeArgs, CliError
     let options = ParsedOptions::parse(
         args,
         GUEST_UI_TREE_USAGE,
-        &["--machine-json", "--max-depth", "--max-nodes"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--max-depth",
+            "--max-nodes",
+        ],
     )?;
     let max_depth = match options.one("--max-depth", GUEST_UI_TREE_USAGE)? {
         Some(value) => parse_bounded(value, "max-depth", 1, 32, GUEST_UI_TREE_USAGE)?,
@@ -571,20 +580,20 @@ fn parse_guest_ui_tree_args(args: &[String]) -> Result<GuestUiTreeArgs, CliError
         None => 2_000,
     };
     Ok(GuestUiTreeArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_UI_TREE_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_UI_TREE_USAGE)?,
         max_depth,
         max_nodes,
     })
 }
 
 fn parse_guest_invoke_args(args: &[String]) -> Result<GuestInvokeArgs, CliError> {
-    let options = ParsedOptions::parse(args, GUEST_INVOKE_USAGE, &["--machine-json", "--node"])?;
+    let options = ParsedOptions::parse(
+        args,
+        GUEST_INVOKE_USAGE,
+        &["--machine-json", "--machine", "--control-socket", "--node"],
+    )?;
     Ok(GuestInvokeArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_INVOKE_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_INVOKE_USAGE)?,
         node: options.required("--node", GUEST_INVOKE_USAGE)?.to_string(),
     })
 }
@@ -593,12 +602,16 @@ fn parse_guest_set_text_args(args: &[String]) -> Result<GuestSetTextArgs, CliErr
     let options = ParsedOptions::parse(
         args,
         GUEST_SET_TEXT_USAGE,
-        &["--machine-json", "--node", "--text"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--node",
+            "--text",
+        ],
     )?;
     Ok(GuestSetTextArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_SET_TEXT_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_SET_TEXT_USAGE)?,
         node: options
             .required("--node", GUEST_SET_TEXT_USAGE)?
             .to_string(),
@@ -612,16 +625,21 @@ fn parse_guest_run_args(args: &[String]) -> Result<GuestRunArgs, CliError> {
     let options = ParsedOptions::parse(
         args,
         GUEST_RUN_USAGE,
-        &["--machine-json", "--command", "--arg", "--timeout-ms"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--command",
+            "--arg",
+            "--timeout-ms",
+        ],
     )?;
     let timeout_ms = match options.one("--timeout-ms", GUEST_RUN_USAGE)? {
         Some(value) => parse_bounded(value, "timeout-ms", 1, 600_000, GUEST_RUN_USAGE)?,
         None => 30_000,
     };
     Ok(GuestRunArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_RUN_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_RUN_USAGE)?,
         command: options.required("--command", GUEST_RUN_USAGE)?.to_string(),
         args: options
             .repeated("--arg")
@@ -636,12 +654,16 @@ fn parse_guest_import_args(args: &[String]) -> Result<GuestImportArgs, CliError>
     let options = ParsedOptions::parse(
         args,
         GUEST_IMPORT_USAGE,
-        &["--machine-json", "--host-path", "--guest-path"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--host-path",
+            "--guest-path",
+        ],
     )?;
     Ok(GuestImportArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_IMPORT_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_IMPORT_USAGE)?,
         host_path: PathBuf::from(options.required("--host-path", GUEST_IMPORT_USAGE)?),
         guest_path: options
             .required("--guest-path", GUEST_IMPORT_USAGE)?
@@ -653,12 +675,16 @@ fn parse_guest_export_args(args: &[String]) -> Result<GuestExportArgs, CliError>
     let options = ParsedOptions::parse(
         args,
         GUEST_EXPORT_USAGE,
-        &["--machine-json", "--guest-path", "--host-path"],
+        &[
+            "--machine-json",
+            "--machine",
+            "--control-socket",
+            "--guest-path",
+            "--host-path",
+        ],
     )?;
     Ok(GuestExportArgs {
-        machine_json: options
-            .required("--machine-json", GUEST_EXPORT_USAGE)?
-            .to_string(),
+        machine: parse_guest_machine(&options, GUEST_EXPORT_USAGE)?,
         guest_path: options
             .required("--guest-path", GUEST_EXPORT_USAGE)?
             .to_string(),
@@ -724,6 +750,26 @@ fn take_value<'a>(args: &'a [String], index: &mut usize, usage: &str) -> Result<
     Ok(value)
 }
 
+fn parse_guest_machine(
+    options: &ParsedOptions<'_>,
+    usage: &str,
+) -> Result<GuestMachineArgs, CliError> {
+    let control_socket = options.one("--control-socket", usage)?.map(PathBuf::from);
+    let machine_json = options.one("--machine-json", usage)?.map(str::to_string);
+    let machine_name = options.one("--machine", usage)?.map(str::to_string);
+    validate_machine_reference(&machine_json, &machine_name, usage)?;
+    if machine_name.is_some() && control_socket.is_none() {
+        return Err(CliError::Usage(format!(
+            "--control-socket is required with --machine; {usage}"
+        )));
+    }
+    Ok(GuestMachineArgs {
+        control_socket,
+        machine_json,
+        machine_name,
+    })
+}
+
 fn validate_machine_reference(
     machine_json: &Option<String>,
     machine_name: &Option<String>,
@@ -775,6 +821,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn guest_json_target() -> GuestMachineArgs {
+        GuestMachineArgs {
+            control_socket: None,
+            machine_json: Some("{}".to_string()),
+            machine_name: None,
+        }
+    }
 
     #[test]
     fn parses_minimal_view_command() {
@@ -961,7 +1015,7 @@ mod tests {
         assert_eq!(
             parse_args(&minimal).unwrap(),
             Command::Guest(GuestCommand::UiTree(GuestUiTreeArgs {
-                machine_json: "{}".to_string(),
+                machine: guest_json_target(),
                 max_depth: 8,
                 max_nodes: 2_000,
             }))
@@ -1003,12 +1057,116 @@ mod tests {
         assert_eq!(
             parse_args(&args).unwrap(),
             Command::Guest(GuestCommand::Run(GuestRunArgs {
-                machine_json: "{}".to_string(),
+                machine: guest_json_target(),
                 command: r"C:\Windows\System32\cmd.exe".to_string(),
                 args: vec!["/c".to_string(), "echo ok".to_string()],
                 timeout_ms: 5_000,
             }))
         );
+    }
+
+    #[test]
+    fn guest_machine_name_requires_control_socket_and_is_mutually_exclusive() {
+        let parsed = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--node".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap();
+        let Command::Guest(GuestCommand::Invoke(invoke)) = parsed else {
+            panic!("expected invoke command");
+        };
+        assert_eq!(invoke.machine.machine_name.as_deref(), Some("builder"));
+        assert_eq!(
+            invoke.machine.control_socket,
+            Some(PathBuf::from("/tmp/control.sock"))
+        );
+        assert_eq!(invoke.machine.machine_json, None);
+
+        let missing_socket = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+            "--node".to_string(),
+            "0".to_string(),
+        ]);
+        assert!(missing_socket.is_err());
+        let both = parse_args(&[
+            "guest".to_string(),
+            "invoke".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--node".to_string(),
+            "0".to_string(),
+        ]);
+        assert!(both.is_err());
+    }
+
+    #[test]
+    fn guest_machine_name_is_accepted_by_all_commands() {
+        let target = [
+            "--machine".to_string(),
+            "builder".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+        ];
+        let cases = [
+            vec!["guest".to_string(), "ui-tree".to_string()],
+            vec![
+                "guest".to_string(),
+                "invoke".to_string(),
+                "--node".to_string(),
+                "0".to_string(),
+            ],
+            vec![
+                "guest".to_string(),
+                "set-text".to_string(),
+                "--node".to_string(),
+                "0".to_string(),
+                "--text".to_string(),
+                "hello".to_string(),
+            ],
+            vec![
+                "guest".to_string(),
+                "run".to_string(),
+                "--command".to_string(),
+                r"C:\Windows\System32\cmd.exe".to_string(),
+            ],
+            vec![
+                "guest".to_string(),
+                "import".to_string(),
+                "--host-path".to_string(),
+                "/tmp/in.txt".to_string(),
+                "--guest-path".to_string(),
+                r"C:\Temp\in.txt".to_string(),
+            ],
+            vec![
+                "guest".to_string(),
+                "export".to_string(),
+                "--guest-path".to_string(),
+                r"C:\Temp\out.txt".to_string(),
+                "--host-path".to_string(),
+                "/tmp/out.txt".to_string(),
+            ],
+        ];
+        for mut args in cases {
+            args.extend(target.iter().cloned());
+            let parsed = parse_args(&args).unwrap();
+            let Command::Guest(command) = parsed else {
+                panic!("expected guest command");
+            };
+            assert_eq!(command.machine().machine_name.as_deref(), Some("builder"));
+        }
     }
 
     #[test]
