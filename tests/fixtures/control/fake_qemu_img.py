@@ -23,6 +23,20 @@ def main():
         with open(target, "w", encoding="utf-8") as output:
             output.write(json.dumps({"format": "qcow2", "backing": backing, "backing_format": backing_format, "size": size}) + "\n")
         return 0
+    if args[0] == "convert":
+        source = args[-2]
+        target = args[-1]
+        input_format = args[args.index("-f") + 1] if "-f" in args else None
+        output_format = args[args.index("-O") + 1] if "-O" in args else None
+        if input_format != "qcow2" or output_format != "qcow2":
+            print("clone conversion must use qcow2 format", file=sys.stderr)
+            return 2
+        if not os.path.exists(source):
+            print(f"missing source image: {source}", file=sys.stderr)
+            return 1
+        with open(target, "w", encoding="utf-8") as output:
+            output.write(json.dumps({"format": "qcow2", "converted_from": source, "backing": None}) + "\n")
+        return 0
     if args[0] == "snapshot":
         action = args[1]
         snapshot = args[2]

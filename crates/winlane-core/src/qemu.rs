@@ -457,7 +457,7 @@ impl QemuBackend {
         create_private_dir(&state_dir, "create clone state directory").await?;
 
         let disk_path = state_dir.join(DISK_FILE);
-        self.run_qemu_img_create(&disk_path, Some(&source.disk_path), spec.disk_gb)
+        self.run_qemu_img_convert(&source.disk_path, &disk_path)
             .await?;
         set_private_file(&disk_path).await?;
 
@@ -1077,6 +1077,19 @@ impl QemuBackend {
         }
         command.arg(disk_path).arg(format!("{disk_gb}G"));
         run_quiet_command(&mut command, "qemu-img create").await
+    }
+
+    async fn run_qemu_img_convert(&self, source_path: &Path, disk_path: &Path) -> CoreResult<()> {
+        let mut command = Command::new(&self.qemu_img_binary);
+        command
+            .arg("convert")
+            .arg("-f")
+            .arg("qcow2")
+            .arg("-O")
+            .arg("qcow2")
+            .arg(source_path)
+            .arg(disk_path);
+        run_quiet_command(&mut command, "qemu-img convert").await
     }
 
     async fn run_qemu_img_snapshot(

@@ -13,7 +13,7 @@ Agents can already operate cloud browsers and Linux shells. Windows desktop soft
 The interesting part is not "Windows in a terminal" by itself. It is the combination of:
 
 - unattended Windows provisioning with measured timings and readiness evidence
-- copy-on-write machine clones that never mutate the golden image
+- independent machine clones that never mutate the golden image or source machine
 - terminal rendering plus hardware keyboard, mouse, paste, scroll, and screenshot control
 - UI Automation tree, invoke, and set-text operations running in the interactive Windows session
 - process execution and explicit file import/export through QEMU Guest Agent
@@ -54,7 +54,7 @@ Not yet proven end-to-end:
 - terminal input behavior across a matrix of real terminal emulators
 - long-running stability, concurrent machine use, and multi-machine cleanup
 
-Running checkpoints include RAM and can be several GiB. Clones are qcow2 overlays backed by the source disk; they receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
+Running checkpoints include RAM and can be several GiB. Clones collapse the backing chain into independent qcow2 images so the source can keep changing or be destroyed safely; cloning a large Windows disk can take real time and disk space. Clones receive fresh firmware-variable and TPM state rather than exact copies of those small states. Machines started before the checkpoint fix do not have the required disk node name and cannot use the new running-checkpoint restore path.
 
 ## Requirements
 
