@@ -15,23 +15,38 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn delayed_quit_fixture(root: &Path) -> PathBuf {
+fn patched_qemu_fixture(root: &Path, name: &str, replacement: &str) -> PathBuf {
     let source =
         std::fs::read_to_string(fixture("fake_qemu_system.py")).expect("read fake qemu fixture");
-    let patched = source
-        .replace(
-            "connection.close()\n                    delayed_exit(0)",
-            "connection.close()\n                    server.close()\n                    threading.Thread(target=delayed_exit, args=(2.0,), daemon=False).start()",
-        );
+    let patched = source.replace(
+        "connection.close()\n                    delayed_exit(0)",
+        replacement,
+    );
     assert_ne!(patched, source);
-    let path = root.join("fake_qemu_delayed_quit.py");
-    std::fs::write(&path, patched).expect("write delayed quit fixture");
+    let path = root.join(name);
+    std::fs::write(&path, patched).expect("write qemu fixture");
     let mut permissions = std::fs::metadata(&path)
         .expect("fixture metadata")
         .permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&path, permissions).expect("fixture permissions");
     path
+}
+
+fn delayed_quit_fixture(root: &Path) -> PathBuf {
+    patched_qemu_fixture(
+        root,
+        "fake_qemu_delayed_quit.py",
+        "connection.close()\n                    server.close()\n                    threading.Thread(target=delayed_exit, args=(2.0,), daemon=False).start()",
+    )
+}
+
+fn stopping_until_signaled_fixture(root: &Path) -> PathBuf {
+    patched_qemu_fixture(
+        root,
+        "fake_qemu_stopping_until_signaled.py",
+        "connection.close()\n                    os.unlink(socket_path)",
+    )
 }
 
 fn write_executable_fixture(root: &Path, name: &str, contents: String) -> PathBuf {
@@ -731,11 +746,11 @@ async fn comma_escaped_qmp_path_does_not_defeat_pid_liveness() {
 async fn stale_record_without_pid_does_not_destroy_stopping_machine() {
     let temp = tempfile::tempdir().expect("temporary machine root");
     let fixture_root = tempfile::tempdir().expect("temporary fixture root");
-    let delayed_fixture = delayed_quit_fixture(fixture_root.path());
+    let stopping_fixture = stopping_until_signaled_fixture(fixture_root.path());
     let mut starter = QemuBackend::new(temp.path())
         .await
         .expect("starter backend")
-        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+        .with_qemu_binaries(&stopping_fixture, fixture("fake_qemu_img.py"));
     let machine = starter
         .create_machine(&spec("stalepid"))
         .await
@@ -764,8 +779,7 @@ async fn stale_record_without_pid_does_not_destroy_stopping_machine() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(qmp_closed, "fake QEMU did not close its QMP listener");
-    std::fs::remove_file(temp.path().join("stalepid/qmp.sock"))
-        .expect("remove stale qmp socket while QEMU is still exiting");
+    assert!(!temp.path().join("stalepid/qmp.sock").exists());
 
     let record_path = temp.path().join("stalepid/machine.json");
     let mut record: serde_json::Value =
@@ -782,13 +796,23 @@ async fn stale_record_without_pid_does_not_destroy_stopping_machine() {
     let mut external = QemuBackend::new(temp.path())
         .await
         .expect("external backend")
-        .with_qemu_binaries(&delayed_fixture, fixture("fake_qemu_img.py"));
+        .with_qemu_binaries(&stopping_fixture, fixture("fake_qemu_img.py"));
+    let qemu_pid = std::fs::read_to_string(temp.path().join("stalepid/qemu.pid"))
+        .expect("read qemu pidfile")
+        .trim()
+        .to_string();
+    let destroy_result = external.destroy_machine(&machine).await;
+    let terminate_status = std::process::Command::new("kill")
+        .arg(&qemu_pid)
+        .status()
+        .expect("terminate fake qemu");
+    assert!(terminate_status.success());
+    let _ = starter.shutdown_machines().await;
     assert!(
-        external.destroy_machine(&machine).await.is_err(),
+        destroy_result.is_err(),
         "destroy accepted a machine whose pidfile still names a live QEMU process"
     );
     assert!(temp.path().join("stalepid").exists());
-    let _ = starter.shutdown_machines().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
