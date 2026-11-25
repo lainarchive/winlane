@@ -3,6 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -163,27 +164,32 @@ pub async fn serve_unix_control(
     let listener = UnixListener::bind(socket_path)?;
     tokio::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).await?;
     let backend = Arc::new(Mutex::new(backend));
+    let shutting_down = Arc::new(AtomicBool::new(false));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let backend = Arc::clone(&backend);
+                let shutting_down = Arc::clone(&shutting_down);
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, backend).await;
+                    let _ = handle_connection(stream, backend, shutting_down).await;
                 });
             }
             interrupted = tokio::signal::ctrl_c() => {
                 interrupted?;
+                shutting_down.store(true, Ordering::SeqCst);
                 break;
             }
             terminated = terminate.recv() => {
                 if terminated.is_some() {
+                    shutting_down.store(true, Ordering::SeqCst);
                     break;
                 }
             }
         }
     }
+    shutting_down.store(true, Ordering::SeqCst);
     let shutdown_result = {
         let mut backend = backend.lock().await;
         backend.shutdown_machines().await
@@ -195,7 +201,11 @@ pub async fn serve_unix_control(
     Ok(())
 }
 
-async fn handle_connection(stream: UnixStream, backend: Arc<Mutex<QemuBackend>>) -> IpcResult<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    backend: Arc<Mutex<QemuBackend>>,
+    shutting_down: Arc<AtomicBool>,
+) -> IpcResult<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     loop {
@@ -205,7 +215,9 @@ async fn handle_connection(stream: UnixStream, backend: Arc<Mutex<QemuBackend>>)
             Err(error) => return Err(error),
         };
         let response = match serde_json::from_slice::<ControlRequest>(&bytes) {
-            Ok(request) => dispatch(request, Arc::clone(&backend)).await,
+            Ok(request) => {
+                dispatch(request, Arc::clone(&backend), Arc::clone(&shutting_down)).await
+            }
             Err(error) => ControlResponse::failure(format!("invalid request: {error}")),
         };
         let mut encoded = serde_json::to_vec(&response)?;
@@ -215,8 +227,15 @@ async fn handle_connection(stream: UnixStream, backend: Arc<Mutex<QemuBackend>>)
     }
 }
 
-async fn dispatch(request: ControlRequest, backend: Arc<Mutex<QemuBackend>>) -> ControlResponse {
+async fn dispatch(
+    request: ControlRequest,
+    backend: Arc<Mutex<QemuBackend>>,
+    shutting_down: Arc<AtomicBool>,
+) -> ControlResponse {
     let mut backend = backend.lock().await;
+    if shutting_down.load(Ordering::SeqCst) {
+        return ControlResponse::failure("control daemon is shutting down");
+    }
     let result = match request {
         ControlRequest::Create { spec } => backend
             .create_machine(&spec)
@@ -300,4 +319,36 @@ async fn read_bounded_line(
 
 pub fn implementation_status() -> &'static str {
     "unix-control-serialization"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatch_rejects_requests_once_shutdown_begins() {
+        let root = tempfile::tempdir().expect("temporary machine root");
+        let backend = QemuBackend::new(root.path()).await.expect("backend");
+        let backend = Arc::new(Mutex::new(backend));
+        let shutting_down = Arc::new(AtomicBool::new(true));
+        let response = dispatch(
+            ControlRequest::Status {
+                machine: MachineHandle {
+                    id: "machine".to_string(),
+                    name: "machine".to_string(),
+                    state_dir: root.path().to_string_lossy().into_owned(),
+                    backend: "qemu".to_string(),
+                    state: winlane_contracts::MachineState::Defined,
+                },
+            },
+            backend,
+            shutting_down,
+        )
+        .await;
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("control daemon is shutting down")
+        );
+    }
 }
