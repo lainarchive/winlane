@@ -155,6 +155,14 @@ impl McpControlPlane {
         serde_json::from_value(machine.clone()).map_err(McpError::from)
     }
 
+    pub(crate) async fn normalize_machine_reference(&self, input: &mut Value) -> McpResult<()> {
+        if input.get("machine").is_some_and(Value::is_string) {
+            let machine = self.machine_input(input).await?;
+            input["machine"] = serde_json::to_value(machine)?;
+        }
+        Ok(())
+    }
+
     pub async fn machine_clone(&self, input: &Value) -> McpResult<Value> {
         let machine = self.machine_input(input).await?;
         Ok(self

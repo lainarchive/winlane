@@ -132,11 +132,19 @@ async fn tool_call(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| McpError::InvalidInput("missing tool name".to_string()))?;
-    let arguments = params
+    let mut arguments = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let outcome = control.dispatch(name, &arguments).await;
+    let normalized = if tool_uses_machine(name) {
+        control.normalize_machine_reference(&mut arguments).await
+    } else {
+        Ok(())
+    };
+    let outcome = match normalized {
+        Ok(()) => control.dispatch(name, &arguments).await,
+        Err(error) => Err(error),
+    };
     let evidence_error = if let Some(store) = evidence {
         match record_tool_evidence(store, name, &arguments, &outcome).await {
             Ok(()) => None,
@@ -157,6 +165,30 @@ async fn tool_call(
         "structuredContent": {"result": result},
         "isError": false
     }))
+}
+
+fn tool_uses_machine(tool: &str) -> bool {
+    matches!(
+        tool,
+        "machine_clone"
+            | "machine_destroy"
+            | "machine_status"
+            | "machine_start"
+            | "machine_stop"
+            | "screenshot"
+            | "click"
+            | "move"
+            | "type_text"
+            | "key"
+            | "scroll"
+            | "checkpoint_create"
+            | "ui_tree"
+            | "ui_invoke"
+            | "ui_set_text"
+            | "process_run"
+            | "file_import"
+            | "file_export"
+    )
 }
 
 async fn record_tool_evidence(
