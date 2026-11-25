@@ -1,0 +1,4 @@
+protocol=kitty
+source=KITTY_WINDOW_ID
+truecolor=true
+tmux=false

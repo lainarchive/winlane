@@ -1,0 +1,23 @@
+[package]
+name = "winlane-cli"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+winlane-contracts.workspace = true
+winlane-core.workspace = true
+winlane-evidence.workspace = true
+winlane-guest = { path = "../winlane-guest" }
+winlane-ipc.workspace = true
+winlane-mcp = { path = "../winlane-mcp" }
+winlane-view = { path = "../winlane-view" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+crossterm = "0.28"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

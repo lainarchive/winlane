@@ -1,0 +1,13 @@
+[package]
+name = "winlane-guest"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+winlane-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64 = "0.22"
+sha2 = "0.10"

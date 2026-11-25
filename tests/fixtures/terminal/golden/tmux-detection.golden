@@ -1,0 +1,4 @@
+protocol=half-block
+source=tmux conservative fallback
+truecolor=true
+tmux=true

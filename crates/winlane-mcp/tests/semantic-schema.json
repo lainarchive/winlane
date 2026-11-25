@@ -1,0 +1,394 @@
+[
+  {
+    "name": "ui_tree",
+    "description": "Read the guest UI Automation tree",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 8
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000,
+          "default": 2000
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "control",
+            "raw"
+          ],
+          "default": "control"
+        }
+      },
+      "required": [
+        "machine"
+      ]
+    }
+  },
+  {
+    "name": "ui_invoke",
+    "description": "Invoke a UI element by tree node path",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^0(/[0-9]+)*$"
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "control",
+            "raw"
+          ],
+          "default": "control"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"
+        }
+      },
+      "required": [
+        "machine",
+        "node"
+      ]
+    }
+  },
+  {
+    "name": "ui_set_text",
+    "description": "Set text on a UI element by tree node path",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^0(/[0-9]+)*$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "control",
+            "raw"
+          ],
+          "default": "control"
+        },
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"
+        }
+      },
+      "required": [
+        "machine",
+        "node",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "process_run",
+    "description": "Run a guest process and capture exit status",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000,
+          "default": 30000
+        }
+      },
+      "required": [
+        "machine",
+        "command"
+      ]
+    }
+  },
+  {
+    "name": "file_import",
+    "description": "Copy a host file into the guest",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "host_path": {
+          "type": "string"
+        },
+        "guest_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "host_path",
+        "guest_path"
+      ]
+    }
+  },
+  {
+    "name": "file_export",
+    "description": "Copy a guest file to the host",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
+            }
+          ]
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "host_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "guest_path",
+        "host_path"
+      ]
+    }
+  }
+]
