@@ -139,19 +139,7 @@ pub fn import_workspace_blocking<T: QgaTransport>(
             MAX_WORKSPACE_ARCHIVE_BYTES,
         )?;
         verify_guest_file(control, &archive_guest_path, bytes, &sha256)?;
-        run_checked(
-            control,
-            TAR_GUEST_PATH,
-            &[
-                "-x".to_owned(),
-                "--force-local".to_owned(),
-                "-f".to_owned(),
-                archive_guest_path.clone(),
-                "-C".to_owned(),
-                staging_dir.clone(),
-            ],
-            600_000,
-        )?;
+        run_guest_tar(control, &archive_guest_path, &staging_dir, true)?;
         finalize_guest_workspace(control, &staging_dir, guest_dir, &backup_dir, overwrite)?;
         Ok::<(u64, String), UiaError>((bytes, sha256))
     })();
@@ -182,20 +170,7 @@ pub fn export_workspace_blocking<T: QgaTransport>(
     let archive_guest_path = guest_unique_path("workspace-export.tar");
     let staging = StagingDirectory::create(host_dir, overwrite)?;
     let result = (|| {
-        run_checked(
-            control,
-            TAR_GUEST_PATH,
-            &[
-                "-c".to_owned(),
-                "--force-local".to_owned(),
-                "-f".to_owned(),
-                archive_guest_path.clone(),
-                "-C".to_owned(),
-                guest_dir.to_owned(),
-                ".".to_owned(),
-            ],
-            600_000,
-        )?;
+        run_guest_tar(control, &archive_guest_path, guest_dir, false)?;
         let (guest_size, guest_hash) = guest_file_info(control, &archive_guest_path)?;
         if guest_size > MAX_WORKSPACE_ARCHIVE_BYTES {
             return Err(UiaError::TransferTooLarge {
@@ -363,7 +338,7 @@ fn prepare_guest_file_parent<T: QgaTransport>(
 ) -> UiaResult<()> {
     let target = ps_quote(target);
     let script = format!(
-        "$parent=Split-Path -Parent {target};if($parent){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};exit 0"
+        "$parent=Split-Path -Parent {target};if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};exit 0"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     if capture.exit_code == Some(0) {
@@ -419,7 +394,7 @@ fn prepare_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};New-Item -ItemType Directory -Force -Path $staging|Out-Null;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}}"
+        "$staging={staging};$target={target};if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}}};New-Item -ItemType Directory -Force -Path $staging|Out-Null"
     );
     let capture = run_powershell(control, &script, 30_000)?;
     match capture.exit_code {
@@ -449,7 +424,7 @@ fn finalize_guest_workspace<T: QgaTransport>(
         "if(Get-ChildItem -LiteralPath $target -Force|Select-Object -First 1){exit 3};"
     };
     let script = format!(
-        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
+        "$staging={staging};$target={target};$backup={backup};$parent=Split-Path -Parent $target;if($parent -and -not(Test-Path -LiteralPath $parent)){{New-Item -ItemType Directory -Force -Path $parent|Out-Null}};$moved=$false;if(Test-Path -LiteralPath $target){{$item=Get-Item -LiteralPath $target -Force;if(-not $item.PSIsContainer){{exit 4}};{overwrite_check}[System.IO.Directory]::Move($target,$backup);$moved=$true}};try{{[System.IO.Directory]::Move($staging,$target)}}catch{{if(($moved) -and (Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)){{try{{[System.IO.Directory]::Move($backup,$target)}}catch{{}}}};Write-Error $_.Exception.Message;exit 1}};if($moved){{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue}};exit 0"
     );
     let capture = run_powershell(control, &script, 60_000)?;
     match capture.exit_code {
@@ -459,23 +434,6 @@ fn finalize_guest_workspace<T: QgaTransport>(
             exit_code,
             message: process_output_summary(&capture),
         }),
-    }
-}
-
-fn run_checked<T: QgaTransport>(
-    control: &mut BlockingUiaControl<T>,
-    command: &str,
-    args: &[String],
-    timeout_ms: u64,
-) -> UiaResult<()> {
-    let capture = control.run_process_blocking(command, args, timeout_ms)?;
-    if capture.exit_code == Some(0) {
-        Ok(())
-    } else {
-        Err(UiaError::Helper {
-            exit_code: capture.exit_code,
-            message: process_output_summary(&capture),
-        })
     }
 }
 
@@ -499,6 +457,40 @@ fn run_powershell<T: QgaTransport>(
         ],
         timeout_ms,
     )
+}
+
+fn run_guest_tar<T: QgaTransport>(
+    control: &mut BlockingUiaControl<T>,
+    archive_path: &str,
+    target_dir: &str,
+    extract: bool,
+) -> UiaResult<()> {
+    let script = guest_tar_script(archive_path, target_dir, extract)?;
+    let capture = run_powershell(control, &script, 600_000)?;
+    if capture.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(UiaError::Helper {
+            exit_code: capture.exit_code,
+            message: process_output_summary(&capture),
+        })
+    }
+}
+
+fn guest_tar_script(archive_path: &str, target_dir: &str, extract: bool) -> UiaResult<String> {
+    let trimmed = archive_path.trim_end_matches(['\\', '/']);
+    let Some(index) = trimmed.rfind(['\\', '/']) else {
+        return Err(UiaError::InvalidGuestPath);
+    };
+    let archive_dir = ps_quote(&trimmed[..index]);
+    let archive_name = ps_quote(&trimmed[index + 1..]);
+    let target_dir = ps_quote(target_dir);
+    let tar = ps_quote(TAR_GUEST_PATH);
+    let operation = if extract { "-x" } else { "-c" };
+    let member = if extract { "" } else { " '.'" };
+    Ok(format!(
+        "$archiveDir={archive_dir};$archiveName={archive_name};$targetDir={target_dir};$code=1;Push-Location -LiteralPath $archiveDir;try{{& {tar} {operation} -f $archiveName -C $targetDir{member};$code=$LASTEXITCODE}}finally{{Pop-Location}};exit $code"
+    ))
 }
 
 fn cleanup_guest_path<T: QgaTransport>(
@@ -713,7 +705,7 @@ fn guest_workspace_sibling_path(target: &str, kind: &str) -> UiaResult<String> {
         .unwrap_or_default();
     Ok(format!(
         "{}\\.winlane-{}-{nanos}-{kind}",
-        &trimmed[..=index],
+        &trimmed[..index],
         std::process::id()
     ))
 }
@@ -883,6 +875,7 @@ fn validate_member_component(name: &str) -> UiaResult<()> {
             | "LPT9"
     );
     let invalid = name.is_empty()
+        || !name.is_ascii()
         || name.len() > 240
         || reserved
         || name
@@ -1682,6 +1675,16 @@ mod tests {
         assert!(target.join("empty-dir").is_dir());
     }
 
+    #[test]
+    fn workspace_archive_rejects_non_ascii_source_entries() {
+        let temp = TestTempDir::new();
+        let source = temp.path.join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("unicode-ä.txt"), b"unicode").unwrap();
+        let result = create_workspace_archive(&source);
+        assert!(matches!(result, Err(UiaError::UnsafeArchiveEntry(_))));
+    }
+
     #[cfg(unix)]
     #[test]
     fn workspace_archive_rejects_symlink_source_entries() {
@@ -1824,5 +1827,30 @@ mod tests {
         }
         assert!(validate_guest_transfer_path(r"\\host\share\workspace", true).is_err());
         assert!(validate_guest_transfer_path(r"C:\", true).is_err());
+    }
+
+    #[test]
+    fn guest_workspace_sibling_path_uses_single_separator() {
+        let path =
+            guest_workspace_sibling_path(r"C:\winlane-workspace", "workspace-import").unwrap();
+        assert!(path.starts_with(r"C:\.winlane-"));
+        assert!(!path.starts_with(r"C:\\.winlane-"));
+        let nested = guest_workspace_sibling_path(r"C:\parent\child", "workspace-import").unwrap();
+        assert!(nested.starts_with(r"C:\parent\.winlane-"));
+        assert!(!nested.contains(r"\\.winlane-"));
+    }
+
+    #[test]
+    fn guest_tar_script_uses_relative_archive_name() {
+        let script = guest_tar_script(
+            r"C:\Windows\Temp\winlane-workspace.tar",
+            r"C:\winlane-workspace",
+            false,
+        )
+        .unwrap();
+        assert!(!script.contains("--force-local"));
+        assert!(script.contains("$archiveName='winlane-workspace.tar'"));
+        assert!(script.contains(r"$archiveDir='C:\Windows\Temp'"));
+        assert!(script.contains(r"$targetDir='C:\winlane-workspace'"));
     }
 }
