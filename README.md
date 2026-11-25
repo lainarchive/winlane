@@ -145,6 +145,32 @@ cargo run --release -p winlane-cli -- machine destroy \
   --machine demo-1-copy
 ```
 
+Create a checkpoint and save the printed reference. A running-machine checkpoint includes QEMU memory/device state; a stopped-machine checkpoint includes disk state. Labels are optional and limited to ASCII letters, digits, dash, and underscore:
+
+```sh
+cargo run --release -p winlane-cli -- machine checkpoint create \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1 \
+  --label before-risky-change \
+  > /tmp/demo-1-checkpoint.json
+```
+
+The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
+
+```sh
+cargo run --release -p winlane-cli -- machine stop \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1
+
+cargo run --release -p winlane-cli -- machine checkpoint restore \
+  --control-socket /tmp/winlane-control.sock \
+  --checkpoint-file /tmp/demo-1-checkpoint.json
+
+cargo run --release -p winlane-cli -- machine start \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1
+```
+
 ## Watch and control the display
 
 ```sh

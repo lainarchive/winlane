@@ -6,13 +6,16 @@ use winlane_guest::uia::{UiaView, is_valid_runtime_id};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const MACHINE_CREATE_USAGE: &str = "usage: winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]";
 pub const MACHINE_LIST_USAGE: &str = "usage: winlane machine list --control-socket PATH";
 pub const MACHINE_ACTION_USAGE: &str = "usage: winlane machine start|stop|status|destroy --control-socket PATH (--machine-json JSON | --machine NAME)";
 pub const MACHINE_CLONE_USAGE: &str = "usage: winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME";
+pub const MACHINE_CHECKPOINT_CREATE_USAGE: &str = "usage: winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]";
+pub const MACHINE_CHECKPOINT_RESTORE_USAGE: &str =
+    "usage: winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH";
 pub const MCP_USAGE: &str = "usage: winlane mcp --control-socket PATH [--evidence-dir PATH]";
 pub const EVIDENCE_EXPORT_USAGE: &str =
     "usage: winlane evidence export --evidence-dir PATH --output PATH";
@@ -77,6 +80,20 @@ pub struct CloneArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointCreateArgs {
+    pub control_socket: PathBuf,
+    pub machine_json: Option<String>,
+    pub machine_name: Option<String>,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointRestoreArgs {
+    pub control_socket: PathBuf,
+    pub checkpoint_file: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MachineCommand {
     Create(CreateArgs),
     List(ListArgs),
@@ -84,6 +101,8 @@ pub enum MachineCommand {
     Stop(MachineArgs),
     Status(MachineArgs),
     Clone(CloneArgs),
+    CheckpointCreate(CheckpointCreateArgs),
+    CheckpointRestore(CheckpointRestoreArgs),
     Destroy(MachineArgs),
 }
 
@@ -328,6 +347,7 @@ fn parse_machine_args(args: &[String]) -> Result<MachineCommand, CliError> {
         "stop" => parse_machine_action_args(&args[1..]).map(MachineCommand::Stop),
         "status" => parse_machine_action_args(&args[1..]).map(MachineCommand::Status),
         "clone" => parse_machine_clone_args(&args[1..]).map(MachineCommand::Clone),
+        "checkpoint" => parse_machine_checkpoint_args(&args[1..]),
         "destroy" => parse_machine_action_args(&args[1..]).map(MachineCommand::Destroy),
         action => Err(CliError::Usage(format!(
             "unknown machine action {action}; {USAGE}"
@@ -469,6 +489,73 @@ fn parse_machine_action_args(args: &[String]) -> Result<MachineArgs, CliError> {
         control_socket: required(control_socket, "--control-socket", MACHINE_ACTION_USAGE)?,
         machine_json,
         machine_name,
+    })
+}
+
+fn parse_machine_checkpoint_args(args: &[String]) -> Result<MachineCommand, CliError> {
+    let Some(action) = args.first() else {
+        return Err(CliError::Usage(format!(
+            "missing machine checkpoint action; {USAGE}"
+        )));
+    };
+    match action.as_str() {
+        "create" => {
+            parse_machine_checkpoint_create_args(&args[1..]).map(MachineCommand::CheckpointCreate)
+        }
+        "restore" => {
+            parse_machine_checkpoint_restore_args(&args[1..]).map(MachineCommand::CheckpointRestore)
+        }
+        action => Err(CliError::Usage(format!(
+            "unknown machine checkpoint action {action}; {USAGE}"
+        ))),
+    }
+}
+
+fn parse_machine_checkpoint_create_args(args: &[String]) -> Result<CheckpointCreateArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        MACHINE_CHECKPOINT_CREATE_USAGE,
+        &["--control-socket", "--machine-json", "--machine", "--label"],
+    )?;
+    let machine_json = options
+        .one("--machine-json", MACHINE_CHECKPOINT_CREATE_USAGE)?
+        .map(str::to_string);
+    let machine_name = options
+        .one("--machine", MACHINE_CHECKPOINT_CREATE_USAGE)?
+        .map(str::to_string);
+    validate_machine_reference(
+        &machine_json,
+        &machine_name,
+        MACHINE_CHECKPOINT_CREATE_USAGE,
+    )?;
+    Ok(CheckpointCreateArgs {
+        control_socket: PathBuf::from(
+            options.required("--control-socket", MACHINE_CHECKPOINT_CREATE_USAGE)?,
+        ),
+        machine_json,
+        machine_name,
+        label: options
+            .one("--label", MACHINE_CHECKPOINT_CREATE_USAGE)?
+            .unwrap_or("manual")
+            .to_string(),
+    })
+}
+
+fn parse_machine_checkpoint_restore_args(
+    args: &[String],
+) -> Result<CheckpointRestoreArgs, CliError> {
+    let options = ParsedOptions::parse(
+        args,
+        MACHINE_CHECKPOINT_RESTORE_USAGE,
+        &["--control-socket", "--checkpoint-file"],
+    )?;
+    Ok(CheckpointRestoreArgs {
+        control_socket: PathBuf::from(
+            options.required("--control-socket", MACHINE_CHECKPOINT_RESTORE_USAGE)?,
+        ),
+        checkpoint_file: PathBuf::from(
+            options.required("--checkpoint-file", MACHINE_CHECKPOINT_RESTORE_USAGE)?,
+        ),
     })
 }
 
@@ -1508,5 +1595,65 @@ mod tests {
             "builder".to_string(),
         ]);
         assert!(parse_args(&both).is_err());
+    }
+    #[test]
+    fn machine_checkpoint_commands_parse() {
+        let create = parse_args(&[
+            "machine".to_string(),
+            "checkpoint".to_string(),
+            "create".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine".to_string(),
+            "builder".to_string(),
+            "--label".to_string(),
+            "before-risky-change".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            create,
+            Command::Machine(MachineCommand::CheckpointCreate(CheckpointCreateArgs {
+                control_socket: PathBuf::from("/tmp/control.sock"),
+                machine_json: None,
+                machine_name: Some("builder".to_string()),
+                label: "before-risky-change".to_string(),
+            }))
+        );
+
+        let restore = parse_args(&[
+            "machine".to_string(),
+            "checkpoint".to_string(),
+            "restore".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--checkpoint-file".to_string(),
+            "/tmp/checkpoint.json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            restore,
+            Command::Machine(MachineCommand::CheckpointRestore(CheckpointRestoreArgs {
+                control_socket: PathBuf::from("/tmp/control.sock"),
+                checkpoint_file: PathBuf::from("/tmp/checkpoint.json"),
+            }))
+        );
+    }
+
+    #[test]
+    fn machine_checkpoint_create_defaults_label() {
+        let parsed = parse_args(&[
+            "machine".to_string(),
+            "checkpoint".to_string(),
+            "create".to_string(),
+            "--control-socket".to_string(),
+            "/tmp/control.sock".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+        ])
+        .unwrap();
+        let Command::Machine(MachineCommand::CheckpointCreate(args)) = parsed else {
+            panic!("expected checkpoint create");
+        };
+        assert_eq!(args.label, "manual");
     }
 }

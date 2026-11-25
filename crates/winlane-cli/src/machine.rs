@@ -2,12 +2,15 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use winlane_contracts::{CpuArch, MachineHandle, MachineSpec};
+use winlane_contracts::{CheckpointRef, CpuArch, MachineHandle, MachineSpec};
 use winlane_core::QemuBackend;
 use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 
 use crate::CliResult;
-use crate::args::{CloneArgs, CreateArgs, DaemonArgs, MachineArgs, MachineCommand, McpArgs};
+use crate::args::{
+    CheckpointCreateArgs, CheckpointRestoreArgs, CloneArgs, CreateArgs, DaemonArgs, MachineArgs,
+    MachineCommand, McpArgs,
+};
 
 pub async fn run_daemon(args: DaemonArgs) -> CliResult<()> {
     let backend = QemuBackend::new(args.root).await?;
@@ -46,7 +49,19 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
             args.machine_name = None;
             Ok(MachineCommand::Clone(args))
         }
-        MachineCommand::Create(_) | MachineCommand::List(_) => Ok(command.clone()),
+        MachineCommand::CheckpointCreate(args) => {
+            checkpoint_label(args)?;
+            let machine =
+                resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
+                    .await?;
+            let mut args = args.clone();
+            args.machine_json = Some(serde_json::to_string(&machine)?);
+            args.machine_name = None;
+            Ok(MachineCommand::CheckpointCreate(args))
+        }
+        MachineCommand::Create(_)
+        | MachineCommand::List(_)
+        | MachineCommand::CheckpointRestore(_) => Ok(command.clone()),
     }
 }
 
@@ -131,6 +146,19 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
                 name: clone_name(args)?,
             },
         )),
+        MachineCommand::CheckpointCreate(args) => Ok((
+            args.control_socket.clone(),
+            ControlRequest::Checkpoint {
+                machine: checkpoint_machine_handle(args)?,
+                label: checkpoint_label(args)?,
+            },
+        )),
+        MachineCommand::CheckpointRestore(args) => Ok((
+            args.control_socket.clone(),
+            ControlRequest::Restore {
+                checkpoint: checkpoint_ref(args)?,
+            },
+        )),
         MachineCommand::Destroy(args) => Ok((
             args.control_socket.clone(),
             ControlRequest::Destroy {
@@ -161,6 +189,36 @@ fn machine_handle(args: &MachineArgs) -> CliResult<MachineHandle> {
         crate::CliError::Usage("machine JSON missing after resolution".to_string())
     })?;
     Ok(serde_json::from_str(machine_json)?)
+}
+
+fn checkpoint_machine_handle(args: &CheckpointCreateArgs) -> CliResult<MachineHandle> {
+    let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+        crate::CliError::Usage("machine JSON missing after resolution".to_string())
+    })?;
+    Ok(serde_json::from_str(machine_json)?)
+}
+
+fn checkpoint_label(args: &CheckpointCreateArgs) -> CliResult<String> {
+    let label = &args.label;
+    if label.is_empty() || label.len() > 64 {
+        return Err(crate::CliError::Usage(
+            "checkpoint label must be 1-64 characters".to_string(),
+        ));
+    }
+    if !label
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(crate::CliError::Usage(
+            "checkpoint label may contain only ASCII letters, digits, '-' and '_'".to_string(),
+        ));
+    }
+    Ok(label.clone())
+}
+
+fn checkpoint_ref(args: &CheckpointRestoreArgs) -> CliResult<CheckpointRef> {
+    let bytes = std::fs::read(&args.checkpoint_file)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn clone_machine_handle(args: &CloneArgs) -> CliResult<MachineHandle> {
@@ -340,6 +398,58 @@ mod tests {
                 name: name.to_string(),
             };
             assert!(machine_request(&MachineCommand::Clone(clone)).is_err());
+        }
+    }
+    #[test]
+    fn checkpoint_create_request_uses_exact_ipc_operation() {
+        let machine = machine_args();
+        let args = CheckpointCreateArgs {
+            control_socket: machine.control_socket.clone(),
+            machine_json: machine.machine_json,
+            machine_name: None,
+            label: "before-risky-change".to_string(),
+        };
+        let (_socket, request) = machine_request(&MachineCommand::CheckpointCreate(args)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "checkpoint");
+        assert_eq!(encoded["label"], "before-risky-change");
+        assert_eq!(encoded["machine"]["id"], "machine-1");
+    }
+
+    #[test]
+    fn checkpoint_restore_request_reads_checkpoint_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = CheckpointRef {
+            id: "checkpoint-1".to_string(),
+            machine_id: "machine-1".to_string(),
+            created_unix_ms: 42,
+            state_dir: "/tmp/builder".to_string(),
+            sha256: Some("abc".to_string()),
+        };
+        let path = directory.path().join("checkpoint.json");
+        std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        let args = CheckpointRestoreArgs {
+            control_socket: PathBuf::from("/tmp/control.sock"),
+            checkpoint_file: path,
+        };
+        let (_socket, request) = machine_request(&MachineCommand::CheckpointRestore(args)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "restore");
+        assert_eq!(encoded["checkpoint"]["id"], "checkpoint-1");
+        assert_eq!(encoded["checkpoint"]["machine_id"], "machine-1");
+    }
+
+    #[test]
+    fn invalid_checkpoint_label_is_rejected_before_ipc() {
+        let machine = machine_args();
+        for label in ["", "bad label", "bad/label"] {
+            let args = CheckpointCreateArgs {
+                control_socket: machine.control_socket.clone(),
+                machine_json: machine.machine_json.clone(),
+                machine_name: None,
+                label: label.to_string(),
+            };
+            assert!(machine_request(&MachineCommand::CheckpointCreate(args)).is_err());
         }
     }
 }
