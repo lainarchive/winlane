@@ -37,6 +37,7 @@ ln -s -- "$(readlink -f "$golden_image")" "$staging/golden.qcow2"
   --output-dir "$output" \
   --machine-name "$machine_name" \
   --winlane-bin "$staging/bin/winlane" \
+  --kitty-bin /tmp/kitty-modern/bin/kitty \
   --driver-script "$staging/scripts/demo/drive-demo.sh"
 
 cp -a -- "$output/." "$final_output/"

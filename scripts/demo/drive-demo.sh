@@ -243,11 +243,7 @@ dismiss_notepad_first_run_popup() {
       echo "drive-demo error: invalid popup node reference" >&2
       return 1
     fi
-    if [[ -n $runtime_id ]]; then
-      invoke_args=$(printf '{"machine":"%s","node":"%s","runtime_id":"%s","timeout_ms":30000}' "$machine_name" "$node" "$runtime_id")
-    else
-      invoke_args=$(printf '{"machine":"%s","node":"%s","timeout_ms":30000}' "$machine_name" "$node")
-    fi
+    invoke_args=$(printf '{"machine":"%s","node":"%s","timeout_ms":30000}' "$machine_name" "$node")
     if ! mcp_call --timeout-seconds 45 --arguments "$invoke_args" ui_invoke; then
       echo 'drive-demo error: failed to invoke Notepad first-run dismissal button' >&2
       return 1
