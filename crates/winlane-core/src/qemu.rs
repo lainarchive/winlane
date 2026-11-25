@@ -1279,7 +1279,7 @@ async fn wait_for_snapshot_job(qmp: &QmpClient, job_id: &str) -> CoreResult<()> 
 
 async fn shutdown_running_machine(running: &mut RunningMachine) -> CoreResult<()> {
     let _ = running.qmp.execute("system_powerdown", None).await;
-    if wait_for_child(&mut running.child, Duration::from_secs(2)).await? {
+    if wait_for_child(&mut running.child, Duration::from_secs(45)).await? {
         shutdown_swtpm(&mut running.swtpm).await;
         return Ok(());
     }
