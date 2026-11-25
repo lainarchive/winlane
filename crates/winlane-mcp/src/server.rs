@@ -1,5 +1,6 @@
 //! Newline-delimited JSON-RPC stdio transport for MCP clients.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -154,23 +155,68 @@ async fn record_tool_evidence(
     arguments: &Value,
     outcome: &McpResult<Value>,
 ) -> McpResult<()> {
-    let payload = json!({
-        "tool": tool,
-        "input": sanitize_tool_input(tool, arguments),
-        "ok": outcome.is_ok(),
-        "result": outcome.as_ref().ok().cloned().unwrap_or(Value::Null),
-        "error": outcome.as_ref().err().map(ToString::to_string),
-    });
     let machine_id = arguments
         .pointer("/machine/id")
         .or_else(|| arguments.pointer("/checkpoint/machine_id"))
         .and_then(Value::as_str)
         .map(str::to_owned);
     let mut store = store.lock().await;
+    let result = match outcome.as_ref() {
+        Ok(result) => sanitize_tool_result(&store, tool, result)?,
+        Err(_) => Value::Null,
+    };
+    let payload = json!({
+        "tool": tool,
+        "input": sanitize_tool_input(tool, arguments),
+        "ok": outcome.is_ok(),
+        "result": result,
+        "error": outcome.as_ref().err().map(ToString::to_string),
+    });
     store
         .record(evidence_kind_for_tool(tool), machine_id, payload)
         .map_err(McpError::from)?;
     Ok(())
+}
+
+fn sanitize_tool_result(
+    store: &EvidenceStore,
+    tool: &str,
+    result: &Value,
+) -> winlane_evidence::EvidenceResult<Value> {
+    match tool {
+        "process_run" => {
+            let mut sanitized = result.clone();
+            for field in ["stdout_base64", "stderr_base64"] {
+                if let Some(encoded) = result.get(field).and_then(Value::as_str) {
+                    let bytes = STANDARD
+                        .decode(encoded)
+                        .map_err(|_| winlane_evidence::EvidenceError::InvalidPayload)?;
+                    let blob = store.put_blob(&bytes)?;
+                    if let Some(object) = sanitized.as_object_mut() {
+                        object.remove(field);
+                        object.insert(
+                            field.trim_end_matches("_base64").to_string(),
+                            json!({
+                                "blob": blob,
+                                "bytes": bytes.len(),
+                            }),
+                        );
+                    }
+                }
+            }
+            Ok(sanitized)
+        }
+        "ui_tree" => {
+            let bytes = serde_json::to_vec(result)
+                .map_err(|_| winlane_evidence::EvidenceError::InvalidPayload)?;
+            let blob = store.put_blob(&bytes)?;
+            Ok(json!({
+                "blob": blob,
+                "bytes": bytes.len(),
+            }))
+        }
+        _ => Ok(result.clone()),
+    }
 }
 
 fn evidence_kind_for_tool(tool: &str) -> &'static str {
@@ -339,5 +385,24 @@ mod tests {
             .await
             .is_none()
         );
+    }
+
+    #[test]
+    fn large_outputs_are_content_addressed_in_evidence() {
+        let root = tempfile::tempdir().expect("temporary evidence root");
+        let store = EvidenceStore::create(root.path()).expect("create evidence store");
+        let process = sanitize_tool_result(
+            &store,
+            "process_run",
+            &json!({"exit_code":0,"stdout_base64":"c2VjcmV0","stderr_base64":""}),
+        )
+        .expect("sanitize process result");
+        assert_eq!(process["stdout"]["bytes"], 6);
+        assert!(process["stdout"]["blob"].is_string());
+        assert!(!process.to_string().contains("c2VjcmV0"));
+        let tree = sanitize_tool_result(&store, "ui_tree", &json!({"ok":true,"nodeCount":49}))
+            .expect("sanitize ui tree");
+        assert!(tree["blob"].is_string());
+        assert!(tree.get("nodeCount").is_none());
     }
 }
