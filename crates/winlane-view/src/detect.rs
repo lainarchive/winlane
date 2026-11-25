@@ -267,4 +267,82 @@ mod tests {
         assert_eq!(detected.protocol, GraphicsProtocol::ITerm2);
         assert!(!detected.renderer_is_supported());
     }
+
+    #[test]
+    fn terminal_matrix_detection_rows() {
+        let rows = [
+            (
+                "kitty TERM plus window id",
+                vec![
+                    ("TERM", "xterm-kitty"),
+                    ("KITTY_WINDOW_ID", "7"),
+                    ("COLORTERM", "truecolor"),
+                ],
+                GraphicsProtocol::Kitty,
+                DetectionSource::KittyWindowId,
+                true,
+                true,
+            ),
+            (
+                "xterm truecolor",
+                vec![("TERM", "xterm-256color"), ("COLORTERM", "truecolor")],
+                GraphicsProtocol::HalfBlock,
+                DetectionSource::TruecolorFallback,
+                true,
+                true,
+            ),
+            (
+                "xterm default color",
+                vec![("TERM", "xterm")],
+                GraphicsProtocol::HalfBlock,
+                DetectionSource::DefaultFallback,
+                false,
+                true,
+            ),
+            (
+                "tmux conservative override",
+                vec![
+                    ("TERM", "xterm-kitty"),
+                    ("KITTY_WINDOW_ID", "7"),
+                    ("TMUX", "/tmp/tmux-1000/default,1,0"),
+                ],
+                GraphicsProtocol::HalfBlock,
+                DetectionSource::TmuxConservativeFallback,
+                false,
+                true,
+            ),
+            (
+                "iterm2 detected unsupported",
+                vec![("TERM_PROGRAM", "iTerm.app")],
+                GraphicsProtocol::ITerm2,
+                DetectionSource::ITerm2,
+                false,
+                false,
+            ),
+            (
+                "sixel TERM detected unsupported",
+                vec![("TERM", "xterm-sixel")],
+                GraphicsProtocol::Sixel,
+                DetectionSource::SixelTerm,
+                false,
+                false,
+            ),
+            (
+                "mlterm sixel detected unsupported",
+                vec![("TERM_PROGRAM", "mlterm")],
+                GraphicsProtocol::Sixel,
+                DetectionSource::SixelTerm,
+                false,
+                false,
+            ),
+        ];
+
+        for (name, fields, protocol, source, truecolor, supported) in rows {
+            let detected = detect_capabilities(&env(&fields));
+            assert_eq!(detected.protocol, protocol, "{name}");
+            assert_eq!(detected.source, source, "{name}");
+            assert_eq!(detected.truecolor, truecolor, "{name}");
+            assert_eq!(detected.renderer_is_supported(), supported, "{name}");
+        }
+    }
 }

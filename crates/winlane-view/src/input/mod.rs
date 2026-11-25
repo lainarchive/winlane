@@ -169,6 +169,18 @@ pub fn map_input(
         }
         ViewerInput::Mouse { col, row, kind } => match kind {
             MouseEventKind::Scroll { direction, steps } => {
+                if terminal_point_to_frame(
+                    context.plan,
+                    context.source_width,
+                    context.source_height,
+                    *col,
+                    *row,
+                    context.geometry,
+                )
+                .is_none()
+                {
+                    return Ok(InputMapping::OutsideFrame);
+                }
                 Ok(InputMapping::Forward(ControlEvent::Scroll {
                     direction: direction.clone(),
                     steps: *steps,
@@ -294,6 +306,46 @@ mod tests {
                 row: 0,
                 kind: MouseEventKind::Click {
                     button: MouseButton::Left,
+                },
+            },
+            context(),
+        )
+        .unwrap();
+        assert_eq!(mapping, InputMapping::OutsideFrame);
+    }
+
+    #[test]
+    fn scroll_inside_frame_is_forwarded() {
+        let mapping = map_input(
+            &ViewerInput::Mouse {
+                col: 10,
+                row: 4,
+                kind: MouseEventKind::Scroll {
+                    direction: ScrollDirection::Down,
+                    steps: 2,
+                },
+            },
+            context(),
+        )
+        .unwrap();
+        assert_eq!(
+            mapping,
+            InputMapping::Forward(ControlEvent::Scroll {
+                direction: ScrollDirection::Down,
+                steps: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn scroll_in_letterbox_is_not_forwarded() {
+        let mapping = map_input(
+            &ViewerInput::Mouse {
+                col: 10,
+                row: 0,
+                kind: MouseEventKind::Scroll {
+                    direction: ScrollDirection::Up,
+                    steps: 1,
                 },
             },
             context(),

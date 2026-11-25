@@ -62,3 +62,62 @@ pub fn write_frame<W: Write>(
     output.write_to(writer)?;
     Ok(output.plan)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use super::*;
+    use crate::frame::Rgb8;
+
+    fn output() -> RenderedOutput {
+        let frame = Frame::solid(1, 1, Rgb8::BLACK).unwrap();
+        render_frame(
+            &frame,
+            TerminalGeometry::cells(1, 1).unwrap(),
+            GraphicsProtocol::HalfBlock,
+        )
+        .unwrap()
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_writes_to_noninteractive_sink() {
+        let output = output();
+        let mut sink = Vec::new();
+        output.write_to(&mut sink).unwrap();
+        assert_eq!(sink, output.bytes);
+    }
+
+    #[test]
+    fn writer_errors_are_returned() {
+        assert!(matches!(
+            output().write_to(&mut FailingWriter),
+            Err(ViewError::Output(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_stream_write_is_returned_as_error() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        drop(reader);
+        assert!(matches!(
+            output().write_to(&mut writer),
+            Err(ViewError::Output(_))
+        ));
+    }
+}

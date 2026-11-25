@@ -218,4 +218,43 @@ mod tests {
         assert!(state.resize(30, 10).unwrap().is_some());
         assert!(state.full_repaint_required());
     }
+
+    #[test]
+    fn zero_terminal_or_cell_dimensions_are_rejected() {
+        for (cols, rows, cell_width, cell_height) in
+            [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0)]
+        {
+            assert!(matches!(
+                TerminalGeometry::new(cols, rows, cell_width, cell_height),
+                Err(ViewError::InvalidGeometry)
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_resize_does_not_mutate_or_require_repaint() {
+        let geometry = TerminalGeometry::cells(20, 10).unwrap();
+        let mut state = ViewportState::new(geometry);
+        state.repaint_completed();
+        assert!(matches!(
+            state.resize(0, 10),
+            Err(ViewError::InvalidGeometry)
+        ));
+        assert_eq!(state.geometry(), geometry);
+        assert!(!state.full_repaint_required());
+    }
+
+    #[test]
+    fn extreme_aspect_ratios_remain_inside_surface() {
+        let geometry = TerminalGeometry::cells(2, 2).unwrap();
+        for (width, height) in [(10_000, 1), (1, 10_000)] {
+            for surface in [OutputSurface::HalfBlockCells, OutputSurface::KittyPixels] {
+                let plan = plan_render(width, height, geometry, surface).unwrap();
+                assert!(plan.frame_width >= 1 && plan.frame_width <= plan.surface_width);
+                assert!(plan.frame_height >= 1 && plan.frame_height <= plan.surface_height);
+                assert!(plan.offset_x + plan.frame_width <= plan.surface_width);
+                assert!(plan.offset_y + plan.frame_height <= plan.surface_height);
+            }
+        }
+    }
 }

@@ -58,10 +58,27 @@ pub fn sanitize_paste(input: &str, policy: PastePolicy) -> Result<String, PasteE
 fn is_invisible_formatting(character: char) -> bool {
     matches!(
         character,
-        '\u{200b}'..='\u{200f}'
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
             | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
             | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
     )
 }
 
@@ -97,6 +114,46 @@ mod tests {
             result,
             Err(PasteError::InvisibleFormatting { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_other_unicode_formatting_characters() {
+        for input in ["soft\u{00ad}hyphen", "arabic\u{061c}mark"] {
+            let result = sanitize_paste(input, PastePolicy::default());
+            assert!(
+                matches!(result, Err(PasteError::InvisibleFormatting { .. })),
+                "accepted formatting character in {input:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_ascii_controls_except_policy_enabled_newline_and_tab() {
+        for codepoint in 0..=0x1f_u32 {
+            if matches!(codepoint, 0x09 | 0x0a | 0x0d) {
+                continue;
+            }
+            let input = char::from_u32(codepoint).unwrap().to_string();
+            assert!(
+                matches!(
+                    sanitize_paste(&input, PastePolicy::default()),
+                    Err(PasteError::ControlCharacter { .. })
+                ),
+                "accepted control U+{codepoint:04X}"
+            );
+        }
+
+        let strict = PastePolicy {
+            allow_newlines: false,
+            allow_tabs: false,
+            ..PastePolicy::default()
+        };
+        for input in ["\n", "\t"] {
+            assert!(matches!(
+                sanitize_paste(input, strict),
+                Err(PasteError::ControlCharacter { .. })
+            ));
+        }
     }
 
     #[test]
