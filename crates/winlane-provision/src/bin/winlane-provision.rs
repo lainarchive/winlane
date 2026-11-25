@@ -4,12 +4,14 @@ use std::time::Duration;
 use winlane_contracts::{BootMode, CpuArch, MachineSpec, NetworkMode};
 use winlane_provision::{ProvisionOptions, provision, write_human_log};
 
+const PROVISION_USAGE: &str = "usage: winlane-provision provision --name NAME --iso WINDOWS_ISO --virtio-iso VIRTIO_ISO --artifact-root DIR [--memory-mb 8192] [--cpus 4] [--disk-gb 80] [--network isolated|nat] [--timeout-minutes 90] [--image-name NAME] [--product-key KEY] [--prepare-only] [--json]";
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
-            usage();
+            eprintln!("{PROVISION_USAGE}");
             ExitCode::from(2)
         }
     }
@@ -18,8 +20,25 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, String> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or_else(|| "missing command".to_string())?;
-    if command != "provision" {
-        return Err(format!("unknown command {command}"));
+    match command.as_str() {
+        "--help" | "-h" => {
+            println!(
+                "winlane-provision — Provision a Windows golden image.\n\n\
+                 Options:\n  -h, --help              Print help\n  -V, --version, version  Print version\n\n\
+                 {PROVISION_USAGE}"
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        "--version" | "-V" | "version" => {
+            if args.next().is_some() {
+                eprintln!("error: version does not take arguments");
+                return Ok(ExitCode::from(2));
+            }
+            println!("winlane-provision {}", env!("CARGO_PKG_VERSION"));
+            return Ok(ExitCode::SUCCESS);
+        }
+        "provision" => {}
+        _ => return Err(format!("unknown command {command}")),
     }
 
     let mut name = None;
@@ -73,7 +92,7 @@ fn run() -> Result<ExitCode, String> {
             "--prepare-only" => prepare_only = true,
             "--json" => json = true,
             "--help" | "-h" => {
-                usage();
+                eprintln!("{PROVISION_USAGE}");
                 return Ok(ExitCode::SUCCESS);
             }
             _ => return Err(format!("unknown argument {arg}")),
@@ -131,10 +150,4 @@ where
         .ok_or_else(|| format!("{flag} needs a value"))?
         .parse::<T>()
         .map_err(|error| format!("invalid value for {flag}: {error}"))
-}
-
-fn usage() {
-    eprintln!(
-        "usage: winlane-provision provision --name NAME --iso WINDOWS_ISO --virtio-iso VIRTIO_ISO --artifact-root DIR [--memory-mb 8192] [--cpus 4] [--disk-gb 80] [--network isolated|nat] [--timeout-minutes 90] [--image-name NAME] [--product-key KEY] [--prepare-only] [--json]"
-    );
 }
