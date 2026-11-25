@@ -18,6 +18,7 @@ thiserror.workspace = true
 tokio.workspace = true
 crossterm = "0.28"
 base64 = "0.22"
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

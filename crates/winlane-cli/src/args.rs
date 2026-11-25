@@ -6,7 +6,7 @@ use winlane_guest::uia::{UiaView, is_valid_runtime_id};
 
 use crate::CliError;
 
-pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane daemon stop --control-socket PATH\n       winlane doctor [--root PATH]\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint list --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine checkpoint delete --control-socket PATH (--machine-json JSON | --machine NAME) --checkpoint-id ID\n       winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH\n       winlane machine wait --control-socket PATH (--machine-json JSON | --machine NAME) --for guest-agent [--timeout-seconds N]\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane daemon stop --control-socket PATH\n       winlane doctor [--root PATH]\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint list --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine checkpoint delete --control-socket PATH (--machine-json JSON | --machine NAME) --checkpoint-id ID\n       winlane machine checkpoint restore --control-socket PATH --checkpoint-file PATH\n       winlane machine wait --control-socket PATH (--machine-json JSON | --machine NAME) --for guest-agent [--timeout-seconds N]\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane evidence verify --evidence-dir PATH\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
 pub const DAEMON_STOP_USAGE: &str = "usage: winlane daemon stop --control-socket PATH";
@@ -26,6 +26,7 @@ pub const EVIDENCE_EXPORT_USAGE: &str =
     "usage: winlane evidence export --evidence-dir PATH --output PATH";
 pub const EVIDENCE_TAIL_USAGE: &str =
     "usage: winlane evidence tail --evidence-dir PATH [--limit N]";
+pub const EVIDENCE_VERIFY_USAGE: &str = "usage: winlane evidence verify --evidence-dir PATH";
 pub const GUEST_UI_TREE_USAGE: &str = "usage: winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]";
 pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]";
 pub const GUEST_SET_TEXT_USAGE: &str = "usage: winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]";
@@ -243,9 +244,15 @@ pub struct EvidenceTailArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceVerifyArgs {
+    pub evidence_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceCommand {
     Export(EvidenceExportArgs),
     Tail(EvidenceTailArgs),
+    Verify(EvidenceVerifyArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -781,6 +788,15 @@ fn parse_evidence_args(args: &[String]) -> Result<EvidenceCommand, CliError> {
                     options.required("--evidence-dir", EVIDENCE_TAIL_USAGE)?,
                 ),
                 limit,
+            }))
+        }
+        "verify" => {
+            let options =
+                ParsedOptions::parse(&args[1..], EVIDENCE_VERIFY_USAGE, &["--evidence-dir"])?;
+            Ok(EvidenceCommand::Verify(EvidenceVerifyArgs {
+                evidence_dir: PathBuf::from(
+                    options.required("--evidence-dir", EVIDENCE_VERIFY_USAGE)?,
+                ),
             }))
         }
         action => Err(CliError::Usage(format!(
@@ -1714,6 +1730,19 @@ mod tests {
             export,
             Command::Evidence(EvidenceCommand::Export(_))
         ));
+        let verify = parse_args(&[
+            "evidence".to_string(),
+            "verify".to_string(),
+            "--evidence-dir".to_string(),
+            "/tmp/evidence".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            verify,
+            Command::Evidence(EvidenceCommand::Verify(EvidenceVerifyArgs {
+                evidence_dir: PathBuf::from("/tmp/evidence"),
+            }))
+        );
     }
 
     #[test]

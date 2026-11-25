@@ -1,10 +1,14 @@
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::json;
-use winlane_evidence::EvidenceStore;
+use sha2::{Digest, Sha256};
+use winlane_contracts::EvidenceEvent;
+use winlane_evidence::{EvidenceStore, validate_event};
 
-use crate::args::{EvidenceCommand, EvidenceExportArgs, EvidenceTailArgs};
+use crate::args::{EvidenceCommand, EvidenceExportArgs, EvidenceTailArgs, EvidenceVerifyArgs};
 use crate::machine::write_json_line;
 use crate::{CliError, CliResult};
 
@@ -12,6 +16,7 @@ pub fn run_evidence_command(command: &EvidenceCommand, output: &mut impl Write) 
     match command {
         EvidenceCommand::Export(args) => export(args, output),
         EvidenceCommand::Tail(args) => tail(args, output),
+        EvidenceCommand::Verify(args) => verify(args, output),
     }
 }
 
@@ -81,6 +86,309 @@ fn tail(args: &EvidenceTailArgs, output: &mut impl Write) -> CliResult<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct VerifyFailure {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    line: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash: Option<String>,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyReport {
+    ok: bool,
+    evidence_dir: PathBuf,
+    events_total: u64,
+    events_valid: u64,
+    blob_references: u64,
+    unique_blob_references: u64,
+    blobs_verified: u64,
+    failure_count: u64,
+    failures: Vec<VerifyFailure>,
+    verifies: &'static str,
+    not_verified: &'static str,
+}
+
+struct BlobReference {
+    line: u64,
+    sequence: Option<u64>,
+    path: String,
+    value: Option<String>,
+}
+
+#[derive(Clone)]
+enum BlobVerification {
+    Verified,
+    Missing,
+    Mismatch(String),
+    ReadError(String),
+}
+
+fn verify(args: &EvidenceVerifyArgs, output: &mut impl Write) -> CliResult<()> {
+    if args.evidence_dir.as_os_str().is_empty() || !args.evidence_dir.is_dir() {
+        return Err(CliError::Usage(format!(
+            "evidence directory does not exist: {}",
+            args.evidence_dir.display()
+        )));
+    }
+    let events_path = args.evidence_dir.join("events.jsonl");
+    if !events_path.is_file() {
+        return Err(CliError::Usage(format!(
+            "evidence events file does not exist: {}",
+            events_path.display()
+        )));
+    }
+    let report = verify_report(&args.evidence_dir, &events_path)?;
+    let failed = !report.ok;
+    let report_json = serde_json::to_value(&report)?;
+    write_json_line(output, &report_json)?;
+    if failed {
+        Err(CliError::Operation(format!(
+            "evidence verification failed with {} failure(s)",
+            report.failure_count
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_report(evidence_dir: &Path, events_path: &Path) -> CliResult<VerifyReport> {
+    let contents = std::fs::read_to_string(events_path)?;
+    let mut events_total = 0_u64;
+    let mut events_valid = 0_u64;
+    let mut expected_sequence = 0_u64;
+    let mut failures = Vec::new();
+    let mut references = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line_number = index as u64 + 1;
+        events_total += 1;
+        let event: EvidenceEvent = match serde_json::from_str(line) {
+            Ok(event) => event,
+            Err(error) => {
+                failures.push(VerifyFailure {
+                    kind: "invalid_json",
+                    line: line_number,
+                    sequence: None,
+                    path: None,
+                    hash: None,
+                    detail: format!("event line is not valid evidence JSON: {error}"),
+                });
+                continue;
+            }
+        };
+        if event.sequence != expected_sequence {
+            failures.push(VerifyFailure {
+                kind: "sequence_mismatch",
+                line: line_number,
+                sequence: Some(event.sequence),
+                path: None,
+                hash: None,
+                detail: format!(
+                    "event sequence {} does not match expected sequence {expected_sequence}",
+                    event.sequence
+                ),
+            });
+        }
+        expected_sequence = event.sequence.saturating_add(1);
+        if let Err(error) = validate_event(&event) {
+            failures.push(VerifyFailure {
+                kind: "invalid_event",
+                line: line_number,
+                sequence: Some(event.sequence),
+                path: None,
+                hash: None,
+                detail: error.to_string(),
+            });
+            continue;
+        }
+        events_valid += 1;
+        collect_blob_references(
+            &event.payload,
+            "payload",
+            line_number,
+            Some(event.sequence),
+            &mut references,
+        );
+    }
+
+    let blobs_dir = evidence_dir.join("blobs");
+    let mut cache: HashMap<String, BlobVerification> = HashMap::new();
+    let mut unique_hashes = HashSet::new();
+    let mut blobs_verified = 0_u64;
+    for reference in references.iter() {
+        let Some(hash) = reference.value.as_deref() else {
+            failures.push(blob_failure(
+                "malformed_reference",
+                reference,
+                None,
+                "blob reference is not a string".to_string(),
+            ));
+            continue;
+        };
+        if !is_lower_hex_sha256(hash) {
+            failures.push(blob_failure(
+                "malformed_hash",
+                reference,
+                Some(hash),
+                "blob reference is not 64 lowercase hexadecimal characters".to_string(),
+            ));
+            continue;
+        }
+        unique_hashes.insert(hash.to_string());
+        if !cache.contains_key(hash) {
+            let path = blobs_dir.join(hash);
+            let result = verify_blob(&path, hash);
+            if matches!(result, BlobVerification::Verified) {
+                blobs_verified += 1;
+            }
+            cache.insert(hash.to_string(), result);
+        }
+        if let Some(result) = cache.get(hash) {
+            match result {
+                BlobVerification::Verified => {}
+                BlobVerification::Missing => failures.push(blob_failure(
+                    "missing_blob",
+                    reference,
+                    Some(hash),
+                    "referenced blob does not exist".to_string(),
+                )),
+                BlobVerification::Mismatch(actual) => failures.push(blob_failure(
+                    "hash_mismatch",
+                    reference,
+                    Some(hash),
+                    format!("blob content hashes to {actual}"),
+                )),
+                BlobVerification::ReadError(error) => failures.push(blob_failure(
+                    "blob_read_error",
+                    reference,
+                    Some(hash),
+                    format!("could not read blob: {error}"),
+                )),
+            }
+        }
+    }
+    let failure_count = failures.len() as u64;
+    Ok(VerifyReport {
+        ok: failure_count == 0,
+        evidence_dir: evidence_dir.to_path_buf(),
+        events_total,
+        events_valid,
+        blob_references: references.len() as u64,
+        unique_blob_references: unique_hashes.len() as u64,
+        blobs_verified,
+        failure_count,
+        failures,
+        verifies: "event JSON shape/kind/sequence rules and recursive string-valued payload fields named 'blob'",
+        not_verified: "hashes stored under other field names, non-string blob fields beyond reporting them malformed, and unreferenced files in blobs/",
+    })
+}
+
+fn blob_failure(
+    kind: &'static str,
+    reference: &BlobReference,
+    hash: Option<&str>,
+    detail: String,
+) -> VerifyFailure {
+    VerifyFailure {
+        kind,
+        line: reference.line,
+        sequence: reference.sequence,
+        path: Some(reference.path.clone()),
+        hash: hash.map(str::to_string),
+        detail,
+    }
+}
+
+fn collect_blob_references(
+    value: &serde_json::Value,
+    path: &str,
+    line: u64,
+    sequence: Option<u64>,
+    references: &mut Vec<BlobReference>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if key == "blob" {
+                    references.push(BlobReference {
+                        line,
+                        sequence,
+                        path: child_path,
+                        value: child.as_str().map(str::to_string),
+                    });
+                } else {
+                    collect_blob_references(child, &child_path, line, sequence, references);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_blob_references(
+                    child,
+                    &format!("{path}[{index}]"),
+                    line,
+                    sequence,
+                    references,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn verify_blob(path: &Path, expected: &str) -> BlobVerification {
+    if !path.is_file() {
+        return BlobVerification::Missing;
+    }
+    match stream_file_sha256(path) {
+        Ok(actual) if actual == expected => BlobVerification::Verified,
+        Ok(actual) => BlobVerification::Mismatch(actual),
+        Err(error) => BlobVerification::ReadError(error.to_string()),
+    }
+}
+
+fn stream_file_sha256(path: &Path) -> io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(digest_hex(hasher.finalize()))
+}
+
+fn digest_hex(digest: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = digest.as_ref();
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn open_existing(evidence_dir: &Path) -> CliResult<EvidenceStore> {
     if evidence_dir.as_os_str().is_empty() || !evidence_dir.is_dir() {
         return Err(CliError::Usage(format!(
@@ -103,7 +411,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::args::{EvidenceExportArgs, EvidenceTailArgs};
+    use crate::args::{EvidenceExportArgs, EvidenceTailArgs, EvidenceVerifyArgs};
 
     #[test]
     fn tail_prints_recent_events_in_original_order() {
@@ -170,6 +478,126 @@ mod tests {
         );
         assert!(!output_path.join("blobs").join(".tmp-ignore").exists());
         assert!(output.ends_with(b"\n"));
+    }
+
+    fn verify_output(evidence_dir: &Path) -> (CliResult<()>, Value) {
+        let mut output = Vec::new();
+        let result = verify(
+            &EvidenceVerifyArgs {
+                evidence_dir: evidence_dir.to_path_buf(),
+            },
+            &mut output,
+        );
+        let value = serde_json::from_slice(&output).expect("verification JSON");
+        (result, value)
+    }
+
+    #[test]
+    fn verify_accepts_valid_events_and_stream_hashed_blob_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = EvidenceStore::create(directory.path()).unwrap();
+        let blob = store.put_blob(b"blob").unwrap();
+        store
+            .record(
+                "process_exited",
+                None,
+                json!({"result":{"stdout":{"blob":blob,"bytes":4}}}),
+            )
+            .unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(result.is_ok());
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["events_total"], 1);
+        assert_eq!(value["events_valid"], 1);
+        assert_eq!(value["blob_references"], 1);
+        assert_eq!(value["unique_blob_references"], 1);
+        assert_eq!(value["blobs_verified"], 1);
+        assert_eq!(value["failure_count"], 0);
+    }
+
+    #[test]
+    fn verify_reports_missing_blob_after_printing_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = EvidenceStore::create(directory.path()).unwrap();
+        store
+            .record(
+                "process_exited",
+                None,
+                json!({"result":{"stdout":{"blob":"a".repeat(64)}}}),
+            )
+            .unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(matches!(result, Err(CliError::Operation(_))));
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["failures"][0]["type"], "missing_blob");
+        assert_eq!(value["failures"][0]["path"], "payload.result.stdout.blob");
+    }
+
+    #[test]
+    fn verify_reports_blob_content_hash_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = EvidenceStore::create(directory.path()).unwrap();
+        let hash = winlane_evidence::sha256_hex(b"correct");
+        std::fs::write(directory.path().join("blobs").join(&hash), b"wrong").unwrap();
+        store
+            .record("ui_tree_read", None, json!({"tree":{"blob":hash}}))
+            .unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(result.is_err());
+        assert_eq!(value["failures"][0]["type"], "hash_mismatch");
+    }
+
+    #[test]
+    fn verify_reports_malformed_hash_and_non_string_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = EvidenceStore::create(directory.path()).unwrap();
+        store
+            .record("process_exited", None, json!({"bad":{"blob":"abc"}}))
+            .unwrap();
+        store
+            .record(
+                "process_exited",
+                None,
+                json!({"bad":{"blob":{"nested":true}}}),
+            )
+            .unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(result.is_err());
+        let types = value["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|failure| failure["type"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(types, ["malformed_hash", "malformed_reference"]);
+        assert_eq!(value["blob_references"], 2);
+        assert_eq!(value["unique_blob_references"], 0);
+    }
+
+    #[test]
+    fn verify_reports_invalid_event_json() {
+        let directory = tempfile::tempdir().unwrap();
+        EvidenceStore::create(directory.path()).unwrap();
+        std::fs::write(directory.path().join("events.jsonl"), "not json\n").unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(result.is_err());
+        assert_eq!(value["failures"][0]["type"], "invalid_json");
+        assert_eq!(value["events_valid"], 0);
+    }
+
+    #[test]
+    fn verify_reports_sequence_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        EvidenceStore::create(directory.path()).unwrap();
+        std::fs::write(
+            directory.path().join("events.jsonl"),
+            "{\"sequence\":1,\"unix_ms\":10,\"machine_id\":null,\"kind\":\"machine_status\",\"payload\":{}}\n",
+        )
+        .unwrap();
+        let (result, value) = verify_output(directory.path());
+        assert!(result.is_err());
+        assert_eq!(value["failures"][0]["type"], "sequence_mismatch");
+        assert_eq!(value["events_valid"], 1);
     }
 
     #[test]

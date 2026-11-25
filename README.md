@@ -305,7 +305,12 @@ cargo run --release -p winlane-cli -- evidence export \
 cargo run --release -p winlane-cli -- evidence tail \
   --evidence-dir /path/to/evidence \
   --limit 20
+
+cargo run --release -p winlane-cli -- evidence verify \
+  --evidence-dir /path/to/evidence
 ```
+
+`evidence verify` prints a compact JSON integrity report and exits nonzero after printing if verification fails. It validates event JSON shape, event kinds, and contiguous sequence numbers. It also recursively verifies string-valued payload fields named `blob`: each must be a well-formed lowercase SHA-256, exist under `blobs/`, and stream-hash to the same content digest. Hash-like values under other field names are not interpreted as blob references, and unreferenced files in `blobs/` are not errors.
 
 ## Stop the machine
 

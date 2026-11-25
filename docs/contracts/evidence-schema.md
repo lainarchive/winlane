@@ -29,3 +29,7 @@ Required first-pass event kinds:
 - `error`
 
 The evidence log can contain secrets visible on the guest screen or in command arguments. Treat exports as sensitive artifacts.
+
+## Verification scope
+
+`winlane evidence verify --evidence-dir PATH` validates `events.jsonl` structure, event kind/payload shape, and contiguous zero-based sequence numbers. Because first-pass event kinds do not yet use a uniform blob-reference schema, verification uses one explicit convention: every string-valued payload object field named `blob`, found recursively, is treated as a content-addressed blob reference. Those references must be lowercase SHA-256 hex, exist under `blobs/`, and stream-hash to the referenced digest. Values under `sha256` or other field names are metadata hashes and are not interpreted as blob references. Unreferenced files in `blobs/` are not verification failures.
