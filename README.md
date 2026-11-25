@@ -93,11 +93,19 @@ cargo run --release -p winlane-cli -- doctor
 
 `doctor` prints one JSON report with pass, warning, and hard-failure checks plus remediation text. It does not install packages or mutate the host. Warnings do not fail the command; missing hard requirements do. Use `--root PATH` to check free space for a non-default machine-root filesystem.
 
-## Build
+## Install or build from source
+
+From the repository root, install the CLI with Cargo:
 
 ```sh
-cargo build --release --workspace
+cargo install --locked --path crates/winlane-cli
+winlane --version
+winlane --help
 ```
+
+Cargo installs the `winlane` binary into its bin directory (usually `$HOME/.cargo/bin`). Make sure that directory is on your `PATH`. To install the separate provisioner as well, run `cargo install --locked --path crates/winlane-provision`.
+
+To build both binaries without installing, run `cargo build --locked --release --workspace`. The binaries are `target/release/winlane` and `target/release/winlane-provision` by default. The examples below use `cargo run` from the checkout; with installed binaries, run `winlane` or `winlane-provision` directly.
 
 ## Provision a golden image
 

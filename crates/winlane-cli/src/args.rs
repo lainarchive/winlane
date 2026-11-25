@@ -6,6 +6,8 @@ use winlane_guest::uia::{UiaView, is_valid_runtime_id};
 
 use crate::CliError;
 
+const VERSION_USAGE: &str = "usage: winlane --version | -V | version";
+
 pub const USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]\n       winlane daemon --root PATH --control-socket PATH\n       winlane daemon stop --control-socket PATH\n       winlane doctor [--root PATH]\n       winlane machine create --control-socket PATH --name NAME [--base-image PATH] [--memory-mb N] [--cpus N] [--disk-gb N] [--network isolated|nat] [--no-tpm] [--bios] [--iso PATH]\n       winlane machine list --control-socket PATH\n       winlane machine start|stop|status --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine clone --control-socket PATH (--machine-json JSON | --machine NAME) --name NAME\n       winlane machine checkpoint create --control-socket PATH (--machine-json JSON | --machine NAME) [--label LABEL]\n       winlane machine checkpoint list --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane machine checkpoint delete --control-socket PATH (--machine-json JSON | --machine NAME) --checkpoint-id ID\n       winlane machine checkpoint restore --control-socket PATH (--checkpoint-file PATH | (--machine-json JSON | --machine NAME) --checkpoint-id ID)\n       winlane machine wait --control-socket PATH (--machine-json JSON | --machine NAME) --for guest-agent [--timeout-seconds N]\n       winlane machine logs --control-socket PATH (--machine-json JSON | --machine NAME) [--lines N]\n       winlane machine destroy --control-socket PATH (--machine-json JSON | --machine NAME)\n       winlane evidence export --evidence-dir PATH --output PATH\n       winlane evidence tail --evidence-dir PATH [--limit N]\n       winlane evidence verify --evidence-dir PATH\n       winlane mcp --control-socket PATH [--evidence-dir PATH]\n       winlane guest ui-tree (--machine-json JSON | --machine NAME) [--control-socket PATH] [--max-depth N] [--max-nodes N] [--view control|raw]\n       winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]\n       winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]\n       winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]\n       winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH\n       winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
 pub const VIEW_USAGE: &str = "usage: winlane view --control-socket PATH (--machine-json JSON | --machine NAME) [--fps N] [--zoom PERCENT] [--cell-width-px N] [--cell-height-px N]";
 pub const DAEMON_USAGE: &str = "usage: winlane daemon --root PATH --control-socket PATH";
@@ -270,6 +272,7 @@ pub enum EvidenceCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
+    Version,
     View(ViewArgs),
     Daemon(DaemonArgs),
     DaemonStop(DaemonStopArgs),
@@ -285,6 +288,13 @@ pub fn parse_args(args: &[String]) -> Result<Command, CliError> {
         return Ok(Command::Help);
     }
     match args[0].as_str() {
+        "--version" | "-V" | "version" => {
+            if args.len() == 1 {
+                Ok(Command::Version)
+            } else {
+                Err(CliError::Usage(VERSION_USAGE.to_string()))
+            }
+        }
         "view" => parse_view_args(&args[1..]).map(Command::View),
         "daemon" if args.get(1).is_some_and(|arg| arg == "stop") => {
             parse_daemon_stop_args(&args[2..]).map(Command::DaemonStop)
@@ -1225,6 +1235,17 @@ mod tests {
             control_socket: None,
             machine_json: Some("{}".to_string()),
             machine_name: None,
+        }
+    }
+
+    #[test]
+    fn parses_standalone_version_commands() {
+        for alias in ["--version", "-V", "version"] {
+            assert_eq!(parse_args(&[alias.to_string()]).unwrap(), Command::Version);
+            assert!(matches!(
+                parse_args(&[alias.to_string(), "--json".to_string()]),
+                Err(CliError::Usage(message)) if message == VERSION_USAGE
+            ));
         }
     }
 
