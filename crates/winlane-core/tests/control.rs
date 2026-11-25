@@ -37,7 +37,7 @@ fn delayed_quit_fixture(root: &Path) -> PathBuf {
     patched_qemu_fixture(
         root,
         "fake_qemu_delayed_quit.py",
-        "connection.close()\n                    server.close()\n                    threading.Thread(target=delayed_exit, args=(2.0,), daemon=False).start()",
+        "connection.close()\n                    threading.Thread(target=delayed_exit, args=(2.0,), daemon=False).start()\n                    server.close()",
     )
 }
 

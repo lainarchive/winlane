@@ -303,17 +303,13 @@ fn disk_check(root: &Path) -> DoctorCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
 
     use crate::Command;
     use crate::args::parse_args;
 
     fn fake_bin(root: &Path, name: &str) {
-        let path = root.join(name);
-        std::fs::write(&path, "#!/bin/sh\necho fake version 1\n").expect("write fake binary");
-        let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("chmod fake binary");
+        symlink("/bin/true", root.join(name)).expect("link fake binary");
     }
 
     #[test]
@@ -375,14 +371,15 @@ mod tests {
             &[(code, vars)],
         );
         for name in ["qemu-system-x86_64", "qemu-img", "swtpm", "ovmf"] {
+            let check = report
+                .checks
+                .iter()
+                .find(|check| check.name == name)
+                .expect("check present");
             assert_eq!(
-                report
-                    .checks
-                    .iter()
-                    .find(|check| check.name == name)
-                    .expect("check present")
-                    .status,
-                "pass"
+                check.status, "pass",
+                "{name} detail: {}; remediation: {:?}",
+                check.detail, check.remediation
             );
         }
     }
