@@ -36,7 +36,8 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - QEMU lifecycle and checkpoint behavior passed real QEMU/KVM tests on blank machines
 - a running Windows checkpoint restored QEMU memory/device and disk state; the restored frame hash exactly matched the pre-change checkpoint-state frame
 - a stopped Windows machine clone booted and exposed a ready guest agent
-- isolated networking produced no QEMU user NAT, `netdev`, or virtio-net device
+- isolated networking produced no QEMU user NAT, `netdev`, or virtio-net device; the guest had no non-loopback adapter, route, DNS, or outbound connectivity
+- NAT networking produced a VirtIO adapter, DHCP address `10.0.2.15/24`, working DNS, host HTTP access, and a real `HTTP/1.1 200 OK` response from `example.com`
 - pointer movement reached the Windows desktop and produced visible cursor/tooltip state
 - MCP initialization and tool discovery exposed lifecycle, hardware, semantic, process, and file tools
 - MCP machine create/start, UI tree read, process execution, file round trips, stop, checkpoint restore, and destroy passed against a live Windows machine
