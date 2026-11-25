@@ -50,6 +50,9 @@ def main():
         if not os.path.exists(target):
             print(f"missing disk image: {target}", file=sys.stderr)
             return 1
+        if action == "-d" and "faildelete" in snapshot:
+            print("forced snapshot deletion failure", file=sys.stderr)
+            return 1
         with open(target + ".snapshots", "a", encoding="utf-8") as output:
             output.write(json.dumps({"action": action, "snapshot": snapshot}) + "\n")
         return 0

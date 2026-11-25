@@ -235,6 +235,11 @@ pub trait MachineBackend {
         &mut self,
         checkpoint: &CheckpointRef,
     ) -> impl Future<Output = ContractResult<MachineHandle>> + Send;
+    fn delete_checkpoint(
+        &mut self,
+        machine: &MachineHandle,
+        checkpoint_id: &str,
+    ) -> impl Future<Output = ContractResult<CheckpointRef>> + Send;
 }
 
 pub trait FrameSource {

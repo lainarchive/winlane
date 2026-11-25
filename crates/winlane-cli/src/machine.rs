@@ -8,8 +8,9 @@ use winlane_ipc::{ControlRequest, UnixControlClient, serve_unix_control};
 
 use crate::CliResult;
 use crate::args::{
-    CheckpointCreateArgs, CheckpointListArgs, CheckpointRestoreArgs, CloneArgs, CreateArgs,
-    DaemonArgs, DaemonStopArgs, MachineArgs, MachineCommand, McpArgs, WaitArgs,
+    CheckpointCreateArgs, CheckpointDeleteArgs, CheckpointListArgs, CheckpointRestoreArgs,
+    CloneArgs, CreateArgs, DaemonArgs, DaemonStopArgs, MachineArgs, MachineCommand, McpArgs,
+    WaitArgs,
 };
 
 pub async fn run_daemon(args: DaemonArgs) -> CliResult<()> {
@@ -127,6 +128,15 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
             args.machine_name = None;
             Ok(MachineCommand::CheckpointList(args))
         }
+        MachineCommand::CheckpointDelete(args) => {
+            let machine =
+                resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
+                    .await?;
+            let mut args = args.clone();
+            args.machine_json = Some(serde_json::to_string(&machine)?);
+            args.machine_name = None;
+            Ok(MachineCommand::CheckpointDelete(args))
+        }
         MachineCommand::Create(_)
         | MachineCommand::List(_)
         | MachineCommand::CheckpointRestore(_) => Ok(command.clone()),
@@ -238,6 +248,13 @@ fn machine_request(command: &MachineCommand) -> CliResult<(PathBuf, ControlReque
                 machine: checkpoint_list_machine_handle(args)?,
             },
         )),
+        MachineCommand::CheckpointDelete(args) => Ok((
+            args.control_socket.clone(),
+            ControlRequest::CheckpointDelete {
+                machine: checkpoint_delete_machine_handle(args)?,
+                checkpoint_id: args.checkpoint_id.clone(),
+            },
+        )),
         MachineCommand::CheckpointRestore(args) => Ok((
             args.control_socket.clone(),
             ControlRequest::Restore {
@@ -284,6 +301,13 @@ fn checkpoint_list_machine_handle(args: &CheckpointListArgs) -> CliResult<Machin
 }
 
 fn checkpoint_machine_handle(args: &CheckpointCreateArgs) -> CliResult<MachineHandle> {
+    let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+        crate::CliError::Usage("machine JSON missing after resolution".to_string())
+    })?;
+    Ok(serde_json::from_str(machine_json)?)
+}
+
+fn checkpoint_delete_machine_handle(args: &CheckpointDeleteArgs) -> CliResult<MachineHandle> {
     let machine_json = args.machine_json.as_deref().ok_or_else(|| {
         crate::CliError::Usage("machine JSON missing after resolution".to_string())
     })?;
@@ -534,6 +558,22 @@ mod tests {
         let (_socket, request) = machine_request(&MachineCommand::CheckpointList(args)).unwrap();
         let encoded = serde_json::to_value(request).unwrap();
         assert_eq!(encoded["op"], "checkpoint_list");
+        assert_eq!(encoded["machine"]["id"], "machine-1");
+    }
+
+    #[test]
+    fn checkpoint_delete_request_uses_exact_ipc_operation() {
+        let machine = machine_args();
+        let args = CheckpointDeleteArgs {
+            control_socket: machine.control_socket.clone(),
+            machine_json: machine.machine_json,
+            machine_name: None,
+            checkpoint_id: "checkpoint-1".to_string(),
+        };
+        let (_socket, request) = machine_request(&MachineCommand::CheckpointDelete(args)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "checkpoint_delete");
+        assert_eq!(encoded["checkpoint_id"], "checkpoint-1");
         assert_eq!(encoded["machine"]["id"], "machine-1");
     }
 

@@ -100,9 +100,30 @@ async fn mcp_tools_map_to_serialized_control_plane() {
         .await
         .expect("checkpoint create");
     assert!(checkpoint["sha256"].is_string());
+    let running_delete_error = mcp
+        .dispatch(
+            "checkpoint_delete",
+            &json!({"machine": machine_json, "checkpoint_id": checkpoint["id"]}),
+        )
+        .await
+        .expect_err("running machine checkpoint deletion should fail");
+    assert!(
+        running_delete_error
+            .to_string()
+            .contains("expected stopped"),
+        "{running_delete_error}"
+    );
     mcp.dispatch("machine_stop", &json!({"machine": machine_json}))
         .await
         .expect("machine stop");
+    let deleted = mcp
+        .dispatch(
+            "checkpoint_delete",
+            &json!({"machine": machine_json, "checkpoint_id": checkpoint["id"]}),
+        )
+        .await
+        .expect("checkpoint delete");
+    assert_eq!(deleted["id"], checkpoint["id"]);
     server.abort();
 }
 

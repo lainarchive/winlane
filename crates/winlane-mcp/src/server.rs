@@ -183,6 +183,7 @@ fn tool_uses_machine(tool: &str) -> bool {
             | "key"
             | "scroll"
             | "checkpoint_create"
+            | "checkpoint_delete"
             | "ui_tree"
             | "ui_invoke"
             | "ui_set_text"
@@ -295,6 +296,7 @@ fn evidence_kind_for_tool(tool: &str) -> &'static str {
         "file_import" => "file_imported",
         "file_export" => "file_exported",
         "checkpoint_create" => "checkpoint_created",
+        "checkpoint_delete" => "checkpoint_deleted",
         "checkpoint_restore" => "checkpoint_restored",
         _ => "machine_status",
     }
@@ -428,6 +430,10 @@ mod tests {
         assert_eq!(evidence_kind_for_tool("process_run"), "process_exited");
         assert_eq!(evidence_kind_for_tool("file_import"), "file_imported");
         assert_eq!(evidence_kind_for_tool("file_export"), "file_exported");
+        assert_eq!(
+            evidence_kind_for_tool("checkpoint_delete"),
+            "checkpoint_deleted"
+        );
         assert_eq!(
             evidence_kind_for_tool("checkpoint_restore"),
             "checkpoint_restored"

@@ -70,6 +70,10 @@ pub enum ControlRequest {
     CheckpointList {
         machine: MachineHandle,
     },
+    CheckpointDelete {
+        machine: MachineHandle,
+        checkpoint_id: String,
+    },
     CaptureFrame {
         machine: MachineHandle,
     },
@@ -315,6 +319,13 @@ async fn dispatch(
             .await
             .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
         ControlRequest::CheckpointList { machine } => backend.list_checkpoints(&machine).await,
+        ControlRequest::CheckpointDelete {
+            machine,
+            checkpoint_id,
+        } => backend
+            .delete_checkpoint(&machine, &checkpoint_id)
+            .await
+            .and_then(|value| serde_json::to_value(value).map_err(CoreError::from)),
         ControlRequest::CaptureFrame { machine } => backend
             .capture_frame(&machine)
             .await

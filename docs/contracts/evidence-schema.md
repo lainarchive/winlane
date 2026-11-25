@@ -19,6 +19,7 @@ Required first-pass event kinds:
 - `frame_captured`
 - `input_sent`
 - `checkpoint_created`
+- `checkpoint_deleted`
 - `checkpoint_restored`
 - `file_imported`
 - `file_exported`

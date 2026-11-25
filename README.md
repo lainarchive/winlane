@@ -178,6 +178,15 @@ cargo run --release -p winlane-cli -- machine checkpoint list \
 
 Entries contain `id`, `label`, `created_unix_ms`, `kind`, `state_dir_bytes`, `registered`, `restorable`, and `error`. `state_dir_bytes` counts only checkpoint artifacts stored outside the qcow2 image; QEMU-internal disk and memory snapshot size is not cheaply available. `restorable` is a cheap metadata, registry, and stopped-machine preflight, not a guarantee that restore cannot fail.
 
+Delete one checkpoint by id while the machine is stopped. The daemon deletes the internal qcow2 snapshot first; the checkpoint directory and registry entry are removed only after that succeeds. This works for checkpoints created from either stopped or running machines:
+
+```sh
+cargo run --release -p winlane-cli -- machine checkpoint delete \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1 \
+  --checkpoint-id CHECKPOINT_ID
+```
+
 The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
 
 ```sh

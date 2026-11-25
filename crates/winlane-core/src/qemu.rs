@@ -809,6 +809,70 @@ impl QemuBackend {
         Ok(json!(entries))
     }
 
+    pub async fn delete_checkpoint(
+        &mut self,
+        machine: &MachineHandle,
+        checkpoint_id: &str,
+    ) -> CoreResult<CheckpointRef> {
+        validate_checkpoint_id(checkpoint_id)?;
+        let mut record = self.load_record(machine).await?;
+        let state = self.inspect_machine_state(machine, false).await?;
+        if matches!(
+            state,
+            MachineState::Running | MachineState::Paused | MachineState::Failed
+        ) {
+            return Err(CoreError::InvalidState {
+                machine: record.handle.name.clone(),
+                actual: match state {
+                    MachineState::Running => "running",
+                    MachineState::Paused => "paused",
+                    _ => "failed",
+                },
+                expected: "stopped",
+            });
+        }
+        let Some(index) = record
+            .checkpoints
+            .iter()
+            .position(|checkpoint| checkpoint.id == checkpoint_id)
+        else {
+            return Err(CoreError::InvalidHandle(
+                "checkpoint is not registered on the machine".to_string(),
+            ));
+        };
+
+        let state_dir = PathBuf::from(&record.handle.state_dir);
+        validate_checkpoint_path(&state_dir, true).await?;
+        let checkpoint_root = state_dir.join(CHECKPOINT_DIR);
+        let checkpoint_dir = checkpoint_root.join(checkpoint_id);
+        validate_checkpoint_path(&checkpoint_root, true).await?;
+        validate_checkpoint_path(&checkpoint_dir, true).await?;
+        let metadata_path = checkpoint_dir.join("checkpoint.json");
+        validate_checkpoint_path(&metadata_path, false).await?;
+        let metadata_bytes = tokio::fs::read(&metadata_path)
+            .await
+            .map_err(CoreError::io("read checkpoint metadata", &metadata_path))?;
+        let metadata: CheckpointMetadata = serde_json::from_slice(&metadata_bytes)?;
+        validate_checkpoint_metadata(&metadata, &record, checkpoint_id)?;
+        if record.pending_loadvm.as_deref() == Some(metadata.qemu_snapshot.as_str()) {
+            return Err(CoreError::InvalidHandle(
+                "checkpoint is selected for the next machine start".to_string(),
+            ));
+        }
+
+        self.run_qemu_img_snapshot("-d", &metadata.qemu_snapshot, &record.disk_path)
+            .await?;
+        let checkpoint = record.checkpoints.remove(index);
+        self.write_record(&record).await?;
+        tokio::fs::remove_dir_all(&checkpoint_dir)
+            .await
+            .map_err(CoreError::io(
+                "remove checkpoint directory",
+                &checkpoint_dir,
+            ))?;
+        Ok(checkpoint)
+    }
+
     pub async fn restore_checkpoint(
         &mut self,
         checkpoint: &CheckpointRef,
@@ -1493,6 +1557,16 @@ impl MachineBackend for QemuBackend {
             .await
             .map_err(Into::into)
     }
+
+    async fn delete_checkpoint(
+        &mut self,
+        machine: &MachineHandle,
+        checkpoint_id: &str,
+    ) -> ContractResult<CheckpointRef> {
+        self.delete_checkpoint(machine, checkpoint_id)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 impl FrameSource for QemuBackend {
@@ -1777,6 +1851,63 @@ fn validate_checkpoint_label(label: &str) -> CoreResult<()> {
     {
         return Err(CoreError::InvalidHandle(
             "checkpoint label may contain only ASCII letters, digits, '-' and '_'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_id(checkpoint_id: &str) -> CoreResult<()> {
+    if checkpoint_id.is_empty() || checkpoint_id.len() > 128 {
+        return Err(CoreError::InvalidHandle(
+            "checkpoint id must be 1-128 characters".to_string(),
+        ));
+    }
+    if !checkpoint_id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(CoreError::InvalidHandle(
+            "checkpoint id may contain only ASCII letters, digits, '-' and '_'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_checkpoint_path(path: &Path, directory: bool) -> CoreResult<()> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(CoreError::io("inspect checkpoint path", path))?;
+    let file_type = metadata.file_type();
+    let valid = if directory {
+        file_type.is_dir()
+    } else {
+        file_type.is_file()
+    };
+    if !valid {
+        return Err(CoreError::InvalidHandle(format!(
+            "checkpoint path is not a regular {}: {}",
+            if directory { "directory" } else { "file" },
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_metadata(
+    metadata: &CheckpointMetadata,
+    record: &MachineRecord,
+    checkpoint_id: &str,
+) -> CoreResult<()> {
+    validate_checkpoint_id(&metadata.qemu_snapshot)?;
+    if metadata.backend != "qemu"
+        || metadata.checkpoint.id != checkpoint_id
+        || metadata.checkpoint.machine_id != record.handle.id
+        || metadata.checkpoint.state_dir != record.handle.state_dir
+        || metadata.qemu_snapshot != checkpoint_id
+        || !metadata.disk_state_included
+    {
+        return Err(CoreError::InvalidHandle(
+            "checkpoint metadata does not match this machine".to_string(),
         ));
     }
     Ok(())
@@ -2154,6 +2285,285 @@ async fn copy_dir_all(source: &Path, target: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checkpoint_delete_spec(name: &str) -> MachineSpec {
+        MachineSpec {
+            name: name.into(),
+            arch: CpuArch::X86_64,
+            memory_mb: 512,
+            cpus: 1,
+            disk_gb: 16,
+            iso_path: None,
+            base_image_path: None,
+            guest_agent: false,
+            network: NetworkMode::Isolated,
+            tpm: false,
+            boot: BootMode::Bios,
+        }
+    }
+
+    fn checkpoint_delete_ref(handle: &MachineHandle, id: &str) -> CheckpointRef {
+        CheckpointRef {
+            id: id.into(),
+            machine_id: handle.id.clone(),
+            created_unix_ms: 10,
+            state_dir: handle.state_dir.clone(),
+            sha256: Some("x".repeat(64)),
+        }
+    }
+
+    fn checkpoint_delete_record(
+        handle: MachineHandle,
+        state_dir: &Path,
+        checkpoints: Vec<CheckpointRef>,
+    ) -> MachineRecord {
+        MachineRecord {
+            handle: handle.clone(),
+            spec: checkpoint_delete_spec(&handle.name),
+            disk_path: state_dir.join(DISK_FILE),
+            qmp_socket_path: state_dir.join(QMP_SOCKET_FILE),
+            qga_socket_path: None,
+            pid: None,
+            ovmf_vars_path: None,
+            tpm_state_dir: None,
+            pending_loadvm: None,
+            checkpoints,
+        }
+    }
+
+    async fn write_checkpoint_metadata(
+        state_dir: &Path,
+        checkpoint: &CheckpointRef,
+        vm_state_included: bool,
+    ) -> PathBuf {
+        let dir = state_dir.join(CHECKPOINT_DIR).join(&checkpoint.id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let metadata = CheckpointMetadata {
+            checkpoint: checkpoint.clone(),
+            label: "delete".into(),
+            backend: "qemu".into(),
+            qemu_snapshot: checkpoint.id.clone(),
+            disk_state_included: true,
+            vm_state_included,
+            firmware_vars_included: false,
+            tpm_state_included: false,
+        };
+        tokio::fs::write(
+            dir.join("checkpoint.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .await
+        .unwrap();
+        dir
+    }
+
+    async fn checkpoint_delete_fixture(
+        root: &Path,
+        state: MachineState,
+        ids: &[(&str, bool)],
+    ) -> (QemuBackend, MachineHandle, PathBuf) {
+        let fake_qemu_img = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/control/fake_qemu_img.py");
+        let backend = QemuBackend::new(root)
+            .await
+            .unwrap()
+            .with_qemu_binaries("qemu-system-x86_64", fake_qemu_img);
+        let state_dir = backend.root_dir().join("builder");
+        tokio::fs::create_dir(&state_dir).await.unwrap();
+        tokio::fs::write(state_dir.join(DISK_FILE), b"qcow2")
+            .await
+            .unwrap();
+        let handle = MachineHandle {
+            id: "machine-1".into(),
+            name: "builder".into(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            backend: "qemu".into(),
+            state,
+        };
+        let checkpoints = ids
+            .iter()
+            .map(|(id, _)| checkpoint_delete_ref(&handle, id))
+            .collect::<Vec<_>>();
+        let record = checkpoint_delete_record(handle.clone(), &state_dir, checkpoints.clone());
+        tokio::fs::write(
+            state_dir.join(MACHINE_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .await
+        .unwrap();
+        for (checkpoint, (_, vm_state_included)) in checkpoints.iter().zip(ids.iter()) {
+            write_checkpoint_metadata(&state_dir, checkpoint, *vm_state_included).await;
+        }
+        (backend, handle, state_dir)
+    }
+
+    fn snapshot_log(state_dir: &Path) -> String {
+        std::fs::read_to_string(state_dir.join("disk.qcow2.snapshots")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_removes_stopped_and_running_metadata_after_qcow2_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let stopped_id = "checkpoint-stopped-delete";
+        let running_id = "checkpoint-running-delete";
+        let (mut backend, handle, state_dir) = checkpoint_delete_fixture(
+            root.path(),
+            MachineState::Stopped,
+            &[(stopped_id, false), (running_id, true)],
+        )
+        .await;
+
+        let stopped = backend
+            .delete_checkpoint(&handle, stopped_id)
+            .await
+            .expect("delete stopped checkpoint");
+        assert_eq!(stopped.id, stopped_id);
+        assert!(!state_dir.join(CHECKPOINT_DIR).join(stopped_id).exists());
+        assert!(state_dir.join(CHECKPOINT_DIR).join(running_id).exists());
+
+        let running = backend
+            .delete_checkpoint(&handle, running_id)
+            .await
+            .expect("delete running checkpoint");
+        assert_eq!(running.id, running_id);
+        assert!(!state_dir.join(CHECKPOINT_DIR).join(running_id).exists());
+        let record_bytes = tokio::fs::read(state_dir.join(MACHINE_FILE)).await.unwrap();
+        let record: MachineRecord = serde_json::from_slice(&record_bytes).unwrap();
+        assert!(record.checkpoints.is_empty());
+
+        let actions = snapshot_log(&state_dir)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["action"], "-d");
+        assert_eq!(actions[0]["snapshot"], stopped_id);
+        assert_eq!(actions[1]["action"], "-d");
+        assert_eq!(actions[1]["snapshot"], running_id);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_missing_checkpoint_does_not_call_qemu_img() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Stopped, &[]).await;
+        let error = backend
+            .delete_checkpoint(&handle, "checkpoint-missing")
+            .await
+            .expect_err("missing checkpoint should fail");
+        assert!(error.to_string().contains("not registered"), "{error}");
+        assert!(snapshot_log(&state_dir).is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_rejects_running_machine_before_qemu_img() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "checkpoint-running-machine";
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Running, &[(id, true)]).await;
+        let error = backend
+            .delete_checkpoint(&handle, id)
+            .await
+            .expect_err("running machine should reject deletion");
+        assert!(error.to_string().contains("expected stopped"), "{error}");
+        assert!(snapshot_log(&state_dir).is_empty());
+        assert!(state_dir.join(CHECKPOINT_DIR).join(id).exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_malformed_metadata_does_not_call_qemu_img() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "checkpoint-malformed";
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Stopped, &[(id, false)]).await;
+        tokio::fs::write(
+            state_dir
+                .join(CHECKPOINT_DIR)
+                .join(id)
+                .join("checkpoint.json"),
+            b"not json",
+        )
+        .await
+        .unwrap();
+        let error = backend
+            .delete_checkpoint(&handle, id)
+            .await
+            .expect_err("malformed metadata should fail");
+        assert!(matches!(error, CoreError::Serialization(_)), "{error}");
+        assert!(snapshot_log(&state_dir).is_empty());
+        assert!(state_dir.join(CHECKPOINT_DIR).join(id).exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_qemu_failure_preserves_registry_and_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "checkpoint-faildelete";
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Stopped, &[(id, false)]).await;
+        let error = backend
+            .delete_checkpoint(&handle, id)
+            .await
+            .expect_err("forced qemu-img failure");
+        assert!(error.to_string().contains("qemu-img snapshot"), "{error}");
+        assert!(state_dir.join(CHECKPOINT_DIR).join(id).exists());
+        let record_bytes = tokio::fs::read(state_dir.join(MACHINE_FILE)).await.unwrap();
+        let record: MachineRecord = serde_json::from_slice(&record_bytes).unwrap();
+        assert_eq!(record.checkpoints.len(), 1);
+        assert_eq!(record.checkpoints[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_rejects_traversal_ids_and_symlinked_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "checkpoint-symlink";
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Stopped, &[(id, false)]).await;
+        assert!(
+            backend
+                .delete_checkpoint(&handle, "../checkpoint-outside")
+                .await
+                .is_err()
+        );
+        assert!(snapshot_log(&state_dir).is_empty());
+
+        let metadata_path = state_dir
+            .join(CHECKPOINT_DIR)
+            .join(id)
+            .join("checkpoint.json");
+        let outside = root.path().join("outside-metadata.json");
+        tokio::fs::rename(&metadata_path, &outside).await.unwrap();
+        std::os::unix::fs::symlink(&outside, &metadata_path).unwrap();
+        let error = backend
+            .delete_checkpoint(&handle, id)
+            .await
+            .expect_err("symlinked metadata should fail");
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(outside.exists());
+        assert!(snapshot_log(&state_dir).is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delete_rejects_checkpoint_selected_for_next_start() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "checkpoint-pending-load";
+        let (mut backend, handle, state_dir) =
+            checkpoint_delete_fixture(root.path(), MachineState::Stopped, &[(id, true)]).await;
+        let record_path = state_dir.join(MACHINE_FILE);
+        let mut record: MachineRecord =
+            serde_json::from_slice(&tokio::fs::read(&record_path).await.unwrap()).unwrap();
+        record.pending_loadvm = Some(id.into());
+        tokio::fs::write(&record_path, serde_json::to_vec(&record).unwrap())
+            .await
+            .unwrap();
+        let error = backend
+            .delete_checkpoint(&handle, id)
+            .await
+            .expect_err("pending load checkpoint should fail");
+        assert!(error.to_string().contains("next machine start"), "{error}");
+        assert!(state_dir.join(CHECKPOINT_DIR).join(id).exists());
+        assert!(snapshot_log(&state_dir).is_empty());
+    }
 
     #[test]
     fn parses_ppm_dimensions() {
