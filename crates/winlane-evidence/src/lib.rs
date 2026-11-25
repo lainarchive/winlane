@@ -203,11 +203,42 @@ impl EvidenceStore {
     }
 
     pub fn put_blob_reader(&self, mut reader: impl Read) -> EvidenceResult<String> {
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(EvidenceError::io(&self.blobs_dir))?;
-        self.put_blob(&bytes)
+        let tmp_path = self.blobs_dir.join(format!(
+            ".tmp-{}-{}-{}",
+            std::process::id(),
+            unix_ms_now(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = File::create(&tmp_path).map_err(EvidenceError::io(&tmp_path))?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = reader
+                    .read(&mut buffer)
+                    .map_err(EvidenceError::io(&tmp_path))?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+                file.write_all(&buffer[..count])
+                    .map_err(EvidenceError::io(&tmp_path))?;
+            }
+            file.sync_data().map_err(EvidenceError::io(&tmp_path))?;
+            let sha256 = digest_hex(hasher.finalize());
+            validate_sha256(&sha256)?;
+            let final_path = self.blobs_dir.join(&sha256);
+            if final_path.exists() {
+                fs::remove_file(&tmp_path).map_err(EvidenceError::io(&tmp_path))?;
+            } else {
+                fs::rename(&tmp_path, &final_path).map_err(EvidenceError::io(&final_path))?;
+            }
+            Ok(sha256)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        result
     }
 
     pub fn blob_bytes(&self, sha256: &str) -> EvidenceResult<Vec<u8>> {
@@ -290,8 +321,12 @@ pub fn required_first_pass_kinds() -> &'static [&'static str] {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    digest_hex(Sha256::digest(bytes))
+}
+
+fn digest_hex(digest: impl AsRef<[u8]>) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(bytes);
+    let digest = digest.as_ref();
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
         output.push(HEX[(byte >> 4) as usize] as char);
@@ -386,6 +421,78 @@ mod tests {
         assert_eq!(sha, sha256_hex(b"screen"));
         assert_eq!(store.blob_bytes(&sha).unwrap(), b"screen");
         assert!(store.blob_path("not-a-hash").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct PatternReader {
+        remaining: usize,
+        position: usize,
+    }
+
+    impl Read for PatternReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let count = self.remaining.min(output.len());
+            for byte in &mut output[..count] {
+                *byte = (self.position % 251) as u8;
+                self.position += 1;
+            }
+            self.remaining -= count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn streamed_blob_hashes_and_places_large_input_incrementally() {
+        let root = temp_root("streamed-blob");
+        let store = EvidenceStore::create(&root).unwrap();
+        let len: usize = 8 * 1024 * 1024 + 17;
+        let mut expected = Sha256::new();
+        let mut position = 0_usize;
+        let mut chunk = [0_u8; 8192];
+        for _ in 0..len.div_ceil(chunk.len()) {
+            let count = (len - position).min(chunk.len());
+            for byte in &mut chunk[..count] {
+                *byte = (position % 251) as u8;
+                position += 1;
+            }
+            expected.update(&chunk[..count]);
+        }
+        let sha = store
+            .put_blob_reader(PatternReader {
+                remaining: len,
+                position: 0,
+            })
+            .unwrap();
+        assert_eq!(sha, digest_hex(expected.finalize()));
+        assert_eq!(
+            fs::metadata(store.blob_path(&sha).unwrap()).unwrap().len(),
+            len as u64
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            output[0] = b'x';
+            Err(io::Error::new(io::ErrorKind::InvalidData, "reader failed"))
+        }
+    }
+
+    #[test]
+    fn failed_streamed_blob_removes_temporary_artifacts() {
+        let root = temp_root("failed-streamed-blob");
+        let store = EvidenceStore::create(&root).unwrap();
+        assert!(store.put_blob_reader(FailingReader).is_err());
+        let entries = fs::read_dir(root.join(BLOBS_DIR))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(entries.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
