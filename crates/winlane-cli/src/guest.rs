@@ -134,13 +134,13 @@ fn execute_operation<T: QgaTransport>(
             node,
             view,
             runtime_id,
-        } => Ok(control.invoke(&node_ref(node, runtime_id.clone()), *view)?),
+        } => Ok(control.invoke(&node_ref(node, runtime_id.clone()), *view, 30_000)?),
         GuestOperation::SetText {
             node,
             text,
             view,
             runtime_id,
-        } => Ok(control.set_text(&node_ref(node, runtime_id.clone()), text, *view)?),
+        } => Ok(control.set_text(&node_ref(node, runtime_id.clone()), text, *view, 30_000)?),
         GuestOperation::Run {
             command,
             args,

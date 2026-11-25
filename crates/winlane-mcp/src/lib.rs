@@ -327,12 +327,14 @@ impl McpControlPlane {
         let node = required_string(input, "node")?;
         let view = uia_view_input(input)?;
         let runtime_id = runtime_id_input(input)?;
+        let timeout_ms = optional_bounded_u64(input, "timeout_ms", 30_000, 1, 600_000)?;
         self.semantic(
             machine,
             SemanticOperation::Invoke {
                 node,
                 view,
                 runtime_id,
+                timeout_ms,
             },
         )
         .await
@@ -344,6 +346,7 @@ impl McpControlPlane {
         let text = required_string(input, "text")?;
         let view = uia_view_input(input)?;
         let runtime_id = runtime_id_input(input)?;
+        let timeout_ms = optional_bounded_u64(input, "timeout_ms", 30_000, 1, 600_000)?;
         self.semantic(
             machine,
             SemanticOperation::SetText {
@@ -351,6 +354,7 @@ impl McpControlPlane {
                 text,
                 view,
                 runtime_id,
+                timeout_ms,
             },
         )
         .await
@@ -435,12 +439,14 @@ enum SemanticOperation {
         node: String,
         view: UiaView,
         runtime_id: Option<String>,
+        timeout_ms: u64,
     },
     SetText {
         node: String,
         text: String,
         view: UiaView,
         runtime_id: Option<String>,
+        timeout_ms: u64,
     },
     Run {
         command: String,
@@ -471,13 +477,15 @@ fn execute_semantic_operation<T: QgaTransport>(
             node,
             view,
             runtime_id,
-        } => control.invoke(&node_ref(&node, runtime_id), view),
+            timeout_ms,
+        } => control.invoke(&node_ref(&node, runtime_id), view, timeout_ms),
         SemanticOperation::SetText {
             node,
             text,
             view,
             runtime_id,
-        } => control.set_text(&node_ref(&node, runtime_id), &text, view),
+            timeout_ms,
+        } => control.set_text(&node_ref(&node, runtime_id), &text, view, timeout_ms),
         SemanticOperation::Run {
             command,
             args,
@@ -643,7 +651,8 @@ pub fn tool_definitions() -> Value {
                 "machine": machine_ref,
                 "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
                 "runtime_id": {"type": "string", "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"},
-                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
+                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000, "default": 30000}
             },
             "required": ["machine", "node"]
         }},
@@ -654,7 +663,8 @@ pub fn tool_definitions() -> Value {
                 "node": {"type": "string", "pattern": "^0(/[0-9]+)*$"},
                 "text": {"type": "string", "maxLength": 4096},
                 "runtime_id": {"type": "string", "pattern": "^-?[0-9]+(\\.-?[0-9]+)*$"},
-                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"}
+                "view": {"type": "string", "enum": ["control", "raw"], "default": "control"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000, "default": 30000}
             },
             "required": ["machine", "node", "text"]
         }},

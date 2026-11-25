@@ -366,8 +366,14 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
         })
     }
 
-    pub fn invoke(&mut self, target: &UiNodeRef, view: UiaView) -> UiaResult<Value> {
+    pub fn invoke(
+        &mut self,
+        target: &UiNodeRef,
+        view: UiaView,
+        timeout_ms: u64,
+    ) -> UiaResult<Value> {
         validate_element_path(&target.id)?;
+        validate_timeout(timeout_ms)?;
         self.install_helper()?;
         let mut args = vec![
             "-Mode".to_owned(),
@@ -383,13 +389,20 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
             }
             args.extend(["-RuntimeId".to_owned(), runtime_id.clone()]);
         }
-        self.run_powershell(&args, 15_000)
+        self.run_powershell(&args, timeout_ms)
             .and_then(|capture| parse_helper_json(&capture.stdout))
     }
 
-    pub fn set_text(&mut self, target: &UiNodeRef, text: &str, view: UiaView) -> UiaResult<Value> {
+    pub fn set_text(
+        &mut self,
+        target: &UiNodeRef,
+        text: &str,
+        view: UiaView,
+        timeout_ms: u64,
+    ) -> UiaResult<Value> {
         const MAX_TEXT_BYTES: usize = 4096;
         validate_element_path(&target.id)?;
+        validate_timeout(timeout_ms)?;
         if text.len() > MAX_TEXT_BYTES {
             return Err(UiaError::InputTooLarge(MAX_TEXT_BYTES));
         }
@@ -410,7 +423,7 @@ impl<T: QgaTransport> BlockingUiaControl<T> {
             }
             args.extend(["-RuntimeId".to_owned(), runtime_id.clone()]);
         }
-        self.run_powershell(&args, 15_000)
+        self.run_powershell(&args, timeout_ms)
             .and_then(|capture| parse_helper_json(&capture.stdout))
     }
 
@@ -675,6 +688,10 @@ fn validate_process_inputs(command: &str, args: &[String], timeout_ms: u64) -> U
             return Err(UiaError::InvalidProcessArgument);
         }
     }
+    validate_timeout(timeout_ms)
+}
+
+fn validate_timeout(timeout_ms: u64) -> UiaResult<()> {
     if !(1..=600_000).contains(&timeout_ms) {
         return Err(UiaError::InvalidTimeout);
     }
