@@ -8,8 +8,8 @@ usage: record-x11.sh --golden-image PATH --runtime-root PATH --control-socket PA
 Requires Xvfb, ffmpeg, ffprobe, python3, and a modern kitty binary. When --kitty-bin
 and WINLANE_KITTY_BIN are absent, the official portable Linux kitty 0.51.1 release
 is downloaded into the user cache outside this repository and verified by SHA-256.
-Writes winlane-demo-x11.mp4, capture-info.json, driver.log, driver-status, terminal
-logs, and evidence-export/ in the output directory.
+Writes winlane-demo-x11.mp4, winlane-demo-x11.mp4.sha256, capture-info.json, driver.log,
+driver-status, terminal logs, and evidence-export/ in the output directory.
 USAGE
 }
 
@@ -75,6 +75,8 @@ ensure_portable_kitty() {
 quoted_command() {
   printf '%q ' "$@"
 }
+
+recorder_command=$(quoted_command "$0" "$@")
 
 golden_image=""
 runtime_root=""
@@ -143,6 +145,23 @@ kitty_bin=$(abs_path "$kitty_bin")
 kitty_version_output=$("$kitty_bin" --version 2>/dev/null || true)
 [[ $kitty_version_output =~ ^kitty\ ([0-9]+\.[0-9]+\.[0-9]+) ]] || fail "unable to identify kitty version from: $kitty_version_output"
 kitty_version=${BASH_REMATCH[1]}
+
+sha256_of() {
+  sha256sum "$1" | awk '{print $1}'
+}
+winlane_version_output=$("$winlane_bin" --version 2>/dev/null | sed -n '1p')
+ffmpeg_version_output=$(ffmpeg -version 2>/dev/null | sed -n '1p')
+capture_os=$(uname -srmo 2>/dev/null || uname -a)
+export WINLANE_CAPTURE_RECORDER_COMMAND="$recorder_command"
+export WINLANE_CAPTURE_OS="$capture_os"
+export WINLANE_CAPTURE_FFMPEG_VERSION="$ffmpeg_version_output"
+export WINLANE_CAPTURE_WINLANE_BIN="$winlane_bin"
+export WINLANE_CAPTURE_WINLANE_SHA256="$(sha256_of "$winlane_bin")"
+export WINLANE_CAPTURE_WINLANE_VERSION="$winlane_version_output"
+export WINLANE_CAPTURE_RECORD_SCRIPT="$script_dir/record-x11.sh"
+export WINLANE_CAPTURE_RECORD_SCRIPT_SHA256="$(sha256_of "$script_dir/record-x11.sh")"
+export WINLANE_CAPTURE_DRIVER_SCRIPT="$driver_script"
+export WINLANE_CAPTURE_DRIVER_SCRIPT_SHA256="$(sha256_of "$driver_script")"
 
 if [[ -z $machine_name ]]; then
   machine_name="winlane-demo-$$"
@@ -369,10 +388,15 @@ if [[ $ui_ready -ne 1 ]]; then
   exit 1
 fi
 
-ffmpeg -hide_banner -loglevel warning -y \
-  -f x11grab -draw_mouse 0 -framerate 30 -video_size 1920x1080 -i "$display" \
-  -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart \
-  "$mp4_file" >"$output_dir/ffmpeg.log" 2>&1 &
+ffmpeg_command=(
+  ffmpeg -hide_banner -loglevel warning -y
+  -f x11grab -draw_mouse 0 -framerate 30 -video_size 1920x1080 -i "$display"
+  -c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart
+  "$mp4_file"
+)
+export WINLANE_CAPTURE_FFMPEG_COMMAND="$(quoted_command "${ffmpeg_command[@]}")"
+export WINLANE_CAPTURE_STARTED_UNIX="$(python3 -c 'import time; print(time.time())')"
+"${ffmpeg_command[@]}" >"$output_dir/ffmpeg.log" 2>&1 &
 ffmpeg_pid=$!
 sleep 0.7
 if ! process_running "$ffmpeg_pid"; then
@@ -413,72 +437,11 @@ if [[ $ffmpeg_exited -ne 1 ]]; then
 fi
 wait "$ffmpeg_pid" >/dev/null 2>&1 || true
 ffmpeg_pid=""
+export WINLANE_CAPTURE_FINISHED_UNIX="$(python3 -c 'import time; print(time.time())')"
 
 probe_ok=0
 probe_stderr=$(mktemp "${TMPDIR:-/tmp}/winlane-ffprobe.XXXXXX")
-if python3 - "$mp4_file" "$capture_info" "$kitty_bin" "$kitty_version" "$display" "$driver_status" >"$probe_stderr.info" 2>"$probe_stderr" <<'PYEOF'
-import hashlib
-import json
-import subprocess
-import sys
-import time
-
-mp4, output, kitty_bin, kitty_version, display, driver_status = sys.argv[1:7]
-probe = subprocess.run(
-    [
-        "ffprobe", "-v", "error", "-print_format", "json",
-        "-show_format", "-show_streams", mp4,
-    ],
-    check=True,
-    capture_output=True,
-    text=True,
-)
-data = json.loads(probe.stdout)
-video = next((stream for stream in data.get("streams", []) if stream.get("codec_type") == "video"), None)
-if video is None:
-    raise SystemExit("no video stream in capture")
-width = int(video.get("width", 0))
-height = int(video.get("height", 0))
-duration = float(data.get("format", {}).get("duration", 0))
-if (width, height) != (1920, 1080):
-    raise SystemExit(f"unexpected capture dimensions: {width}x{height}")
-if duration <= 0.5:
-    raise SystemExit(f"capture duration is too short: {duration}")
-digest = hashlib.sha256()
-with open(mp4, "rb") as stream:
-    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-        digest.update(chunk)
-info = {
-    "capture": {
-        "file": mp4,
-        "sha256": digest.hexdigest(),
-        "width": width,
-        "height": height,
-        "duration_seconds": duration,
-        "codec": video.get("codec_name"),
-        "input_framerate": 30,
-        "time_compression": False,
-        "crop": None,
-        "crop_reason": "kitty occupies the complete bare Xvfb root window at capture size",
-        "start_after_interactive_readiness": True,
-        "start_disclosure": "ffmpeg starts only after the driver proves interactive desktop/UIA readiness; initial boot is not presented as part of the recorded action sequence",
-    },
-    "terminal": {
-        "kitty_bin": kitty_bin,
-        "kitty_version": kitty_version,
-        "display": display,
-        "multiplexer": None,
-        "view_mode": "winlane view directly in kitty",
-    },
-    "driver": {
-        "exit_status": int(driver_status) if driver_status.isdigit() else driver_status,
-    },
-    "created_unix_time": time.time(),
-}
-with open(output, "w", encoding="utf-8") as stream:
-    json.dump(info, stream, indent=2, sort_keys=True)
-    stream.write("\n")
-PYEOF
+if python3 "$script_dir/write_capture_info.py" "$mp4_file" "$capture_info" "$kitty_bin" "$kitty_version" "$display" "$driver_status" >"$probe_stderr.info" 2>"$probe_stderr"
 then
   probe_ok=1
 fi

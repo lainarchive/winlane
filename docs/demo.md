@@ -61,12 +61,13 @@ The sequence creates and starts a disposable machine, launches Notepad in the in
 Outputs:
 
 - `winlane-demo-x11.mp4` — real-time 1920x1080 H.264 x11grab capture; no time compression, speedup, or fabricated terminal output
-- `capture-info.json` — MP4 dimensions/duration/codec/SHA-256, kitty version/path, display number, crop/time-compression declarations, explicit post-readiness recording disclosure, and driver exit status
+- `capture-info.json` — MP4 dimensions/duration/codec/SHA-256, SHA-256 sidecar path, wall-clock/duration ratio validation, exact recorder and ffmpeg commands, capture environment (OS, ffmpeg/winlane versions and hashes, script hashes), kitty version/path, display number, crop/time-compression declarations, explicit post-readiness recording disclosure, and driver exit status
+- `winlane-demo-x11.mp4.sha256` — `sha256sum`-compatible source MP4 digest sidecar
 - `driver.log` and `driver-status` — real driver output and exit status
 - `ffmpeg.log`, `kitty.log`, `xvfb.log`, and `daemon.log`
 - `evidence-export/`
 
-Once recording has started, the MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden. If the driver fails before interactive-desktop readiness, recording never starts and those capture artifacts do not exist.
+Once recording has started, the MP4 is written and `capture-info.json` is validated even when the driver fails, so the failure remains inspectable instead of being hidden. Validation rejects anything other than the unscaled 1920x1080 source, a changed output frame rate, or an MP4 whose duration is materially shorter than the measured x11grab wall-clock interval, so a time-compressed or reduced-resolution capture cannot silently pass as real-time evidence. Manifest generation also fails if command or capture-environment provenance fields are absent. If the driver fails before interactive-desktop readiness, recording never starts and those capture artifacts do not exist.
 
 ## README highlight asset audit
 
