@@ -710,6 +710,7 @@ dependencies = [
  "tokio",
  "winlane-contracts",
  "winlane-core",
+ "winlane-evidence",
  "winlane-guest",
  "winlane-ipc",
  "winlane-mcp",

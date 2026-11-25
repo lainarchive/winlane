@@ -7,6 +7,7 @@ repository.workspace = true
 [dependencies]
 winlane-contracts.workspace = true
 winlane-core.workspace = true
+winlane-evidence.workspace = true
 winlane-guest = { path = "../winlane-guest" }
 winlane-ipc.workspace = true
 winlane-mcp = { path = "../winlane-mcp" }

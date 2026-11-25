@@ -1,6 +1,7 @@
 //! Narrow command line entrypoint for machine control, guest control, and terminal viewing.
 
 pub mod args;
+pub mod evidence;
 pub mod guest;
 pub mod live;
 pub mod machine;
@@ -13,6 +14,7 @@ pub use args::{
     Command, CreateArgs, DaemonArgs, GuestCommand, MachineArgs, MachineCommand, McpArgs, USAGE,
     VIEW_USAGE, ViewArgs, parse_args,
 };
+pub use evidence::run_evidence_command;
 pub use guest::run_guest_command;
 pub use live::{LiveViewConfig, capture_frame, run_live_view};
 pub use machine::{run_daemon, run_machine_command, run_mcp};
@@ -40,6 +42,8 @@ pub enum CliError {
     #[error(transparent)]
     Uia(#[from] winlane_guest::uia::UiaError),
     #[error(transparent)]
+    Evidence(#[from] winlane_evidence::EvidenceError),
+    #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
 }
 
@@ -64,9 +68,14 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
             let mut output = stdout.lock();
             run_guest_command(&guest, &mut output).await
         }
+        Command::Evidence(evidence) => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_evidence_command(&evidence, &mut output)
+        }
     }
 }
 
 pub fn implementation_status() -> &'static str {
-    "guest-control-cli"
+    "lifecycle-evidence-cli"
 }

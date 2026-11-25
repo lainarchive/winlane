@@ -107,6 +107,19 @@ cargo run -p winlane-cli -- machine start \
 
 `machine create` prints one JSON object. The current alpha passes that object back to lifecycle, view, and guest commands. This is functional, but it is not the final CLI ergonomics.
 
+Clone a stopped machine or destroy it explicitly:
+
+```sh
+clone=$(cargo run -p winlane-cli -- machine clone \
+  --control-socket /tmp/winlane-control.sock \
+  --machine-json "$machine" \
+  --name demo-1-copy)
+
+cargo run -p winlane-cli -- machine destroy \
+  --control-socket /tmp/winlane-control.sock \
+  --machine-json "$clone"
+```
+
 ## Watch and control the display
 
 ```sh
@@ -177,6 +190,18 @@ cargo run -p winlane-cli -- mcp \
 The hardware-plane MCP tools cover machine creation, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text.
 
 Semantic guest MCP tools are implemented for UI tree, invoke, set-text, process execution, and file transfer. They appear in `tools/list`, but the MCP path has not yet been validated against a live Windows guest; use the guest CLI for the validated path until that proof lands.
+
+Export or inspect evidence events:
+
+```sh
+cargo run -p winlane-cli -- evidence export \
+  --evidence-dir /path/to/evidence \
+  --output /path/to/evidence-export.jsonl
+
+cargo run -p winlane-cli -- evidence tail \
+  --evidence-dir /path/to/evidence \
+  --limit 20
+```
 
 ## Stop the machine
 
