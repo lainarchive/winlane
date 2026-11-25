@@ -119,6 +119,16 @@ impl QmpClient {
         command: &str,
         arguments: Option<Value>,
     ) -> Result<Value, QmpError> {
+        self.execute_with_timeout(command, arguments, COMMAND_TIMEOUT)
+            .await
+    }
+
+    pub async fn execute_with_timeout(
+        &self,
+        command: &str,
+        arguments: Option<Value>,
+        command_timeout: Duration,
+    ) -> Result<Value, QmpError> {
         if self.inner.poisoned.load(Ordering::SeqCst) {
             return Err(QmpError::Closed);
         }
@@ -141,7 +151,7 @@ impl QmpClient {
             writer.flush().await?;
         }
 
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let deadline = Instant::now() + command_timeout;
         let received = timeout_at(deadline, async {
             let mut responses = self.inner.responses.lock().await;
             responses.recv().await

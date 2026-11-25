@@ -25,6 +25,8 @@ const SCREEN_FILE: &str = "screen.json";
 const FRAME_DIR: &str = "frames";
 const CHECKPOINT_DIR: &str = "checkpoints";
 const SYSTEM_DISK_NODE: &str = "winlane-system";
+const SNAPSHOT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+const KEY_HOLD_TIME_MS: u64 = 30;
 const DISK_FILE: &str = "disk.qcow2";
 const QMP_SOCKET_FILE: &str = "qmp.sock";
 const QGA_SOCKET_FILE: &str = "qga.sock";
@@ -270,7 +272,7 @@ impl QemuBackend {
 
         if let Some(snapshot) = record.pending_loadvm.clone() {
             let load_result: CoreResult<()> = async {
-                qmp.execute(
+                qmp.execute_with_timeout(
                     "snapshot-load",
                     Some(json!({
                         "job-id": format!("load-{snapshot}"),
@@ -278,6 +280,7 @@ impl QemuBackend {
                         "vmstate": SYSTEM_DISK_NODE,
                         "devices": [SYSTEM_DISK_NODE],
                     })),
+                    SNAPSHOT_COMMAND_TIMEOUT,
                 )
                 .await?;
                 wait_for_snapshot_job(&qmp, &format!("load-{snapshot}")).await?;
@@ -491,7 +494,7 @@ impl QemuBackend {
         let running = matches!(self.status_machine(machine).await?, MachineState::Running);
         let vm_state_included = if running {
             let qmp = self.qmp_for_machine(machine).await?;
-            qmp.execute(
+            qmp.execute_with_timeout(
                 "snapshot-save",
                 Some(json!({
                     "job-id": checkpoint_id,
@@ -499,6 +502,7 @@ impl QemuBackend {
                     "vmstate": SYSTEM_DISK_NODE,
                     "devices": [SYSTEM_DISK_NODE],
                 })),
+                SNAPSHOT_COMMAND_TIMEOUT,
             )
             .await?;
             wait_for_snapshot_job(&qmp, &checkpoint_id).await?;
@@ -1440,8 +1444,12 @@ async fn send_qmp_keys(qmp: &QmpClient, keys: &[&'static str]) -> CoreResult<()>
         .iter()
         .map(|key| json!({"type": "qcode", "data": key}))
         .collect::<Vec<_>>();
-    qmp.execute("send-key", Some(json!({ "keys": keys, "hold-time": 30 })))
-        .await?;
+    qmp.execute(
+        "send-key",
+        Some(json!({ "keys": keys, "hold-time": KEY_HOLD_TIME_MS })),
+    )
+    .await?;
+    sleep(Duration::from_millis(KEY_HOLD_TIME_MS + 10)).await;
     Ok(())
 }
 
