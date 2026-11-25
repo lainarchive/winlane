@@ -776,6 +776,71 @@ async fn base_image_and_guest_agent_create_overlay_and_qga_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uefi_boot_uses_secure_firmware_parity_with_provisioning() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let firmware_root = tempfile::tempdir().expect("temporary firmware root");
+    let code = firmware_root.path().join("OVMF_CODE.secboot.fd");
+    let vars_template = firmware_root.path().join("OVMF_VARS.ms.fd");
+    std::fs::write(&code, b"secure code").expect("write firmware code");
+    std::fs::write(&vars_template, b" microsoft keys ").expect("write firmware vars");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"))
+        .with_uefi_firmware(&code, &vars_template);
+    let mut machine_spec = spec("secureuefi");
+    machine_spec.boot = BootMode::Uefi;
+    let machine = backend
+        .create_machine(&machine_spec)
+        .await
+        .expect("create uefi machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start uefi machine");
+
+    let state_dir = PathBuf::from(&machine.state_dir);
+    let argv: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(state_dir.join("qmp.sock.argv")).expect("read QEMU argv"),
+    )
+    .expect("parse QEMU argv");
+    let machine_index = argv
+        .iter()
+        .position(|arg| arg == "-machine")
+        .expect("machine argument");
+    assert_eq!(argv[machine_index + 1], "q35,smm=on,accel=kvm");
+    assert!(
+        argv.iter()
+            .any(|arg| arg == "driver=cfi.pflash01,property=secure,value=on")
+    );
+    let code_arg = argv
+        .iter()
+        .find(|arg| arg.starts_with("if=pflash,format=raw,unit=0,"))
+        .expect("firmware code pflash");
+    assert!(code_arg.contains("readonly=on"));
+    assert!(code_arg.contains(code.to_string_lossy().as_ref()));
+    let vars_path = state_dir.join("ovmf-vars.fd");
+    let vars_arg = argv
+        .iter()
+        .find(|arg| arg.starts_with("if=pflash,format=raw,unit=1,"))
+        .expect("firmware vars pflash");
+    assert!(vars_arg.contains(vars_path.to_string_lossy().as_ref()));
+    assert_eq!(
+        std::fs::read(&vars_path).expect("read copied vars"),
+        b" microsoft keys ".as_slice()
+    );
+
+    backend
+        .stop_machine(&machine)
+        .await
+        .expect("stop uefi machine");
+    backend
+        .destroy_machine(&machine)
+        .await
+        .expect("destroy uefi machine");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guest_agent_socket_path_commas_are_escaped_for_qemu() {
     let outer = tempfile::tempdir().expect("temporary outer root");
     let root = outer.path().join("comma,root");

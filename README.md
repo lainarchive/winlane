@@ -70,7 +70,7 @@ Host:
 
 - Linux x86_64 with KVM access
 - QEMU with `qemu-system-x86_64` and `qemu-img`
-- OVMF UEFI firmware
+- OVMF UEFI Secure Boot firmware (`OVMF_CODE_4M.secboot.fd` and `OVMF_VARS_4M.ms.fd`, or distro equivalents)
 - swtpm
 - Rust stable, using the repository toolchain file
 - kitty, Ghostty, or WezTerm for the validated Kitty-graphics high-resolution path, or any truecolor terminal for the half-block preview fallback; iTerm2, tmux, and sixel currently use conservative fallback behavior until independently validated

@@ -68,12 +68,12 @@ fn default_machine_root() -> PathBuf {
 fn default_ovmf_pairs() -> Vec<(PathBuf, PathBuf)> {
     vec![
         (
-            PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.fd"),
-            PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.ms.fd"),
         ),
         (
-            PathBuf::from("/usr/share/OVMF/OVMF_CODE.fd"),
-            PathBuf::from("/usr/share/OVMF/OVMF_VARS.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_CODE.secboot.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_VARS.ms.fd"),
         ),
     ]
 }
@@ -239,7 +239,7 @@ fn ovmf_check(pairs: &[(PathBuf, PathBuf)]) -> DoctorCheck {
     }
     fail(
         "ovmf",
-        "no complete OVMF code/vars firmware pair found",
+        "no complete Secure Boot OVMF code/vars firmware pair found",
         "install OVMF UEFI firmware, for example: sudo apt install ovmf",
     )
 }

@@ -1218,7 +1218,11 @@ impl QemuBackend {
             "-name".to_string(),
             record.handle.name.clone(),
             "-machine".to_string(),
-            "q35,accel=kvm".to_string(),
+            if record.spec.boot == BootMode::Uefi {
+                "q35,smm=on,accel=kvm".to_string()
+            } else {
+                "q35,accel=kvm".to_string()
+            },
             "-cpu".to_string(),
             "host".to_string(),
             "-m".to_string(),
@@ -1258,14 +1262,16 @@ impl QemuBackend {
             }
             record.ovmf_vars_path = Some(vars_path.clone());
             args.extend([
+                "-global".to_string(),
+                "driver=cfi.pflash01,property=secure,value=on".to_string(),
                 "-drive".to_string(),
                 format!(
-                    "if=pflash,format=raw,readonly=on,file={}",
+                    "if=pflash,format=raw,unit=0,readonly=on,file={}",
                     qemu_option_escape(&path_to_string(&code)?)
                 ),
                 "-drive".to_string(),
                 format!(
-                    "if=pflash,format=raw,file={}",
+                    "if=pflash,format=raw,unit=1,file={}",
                     qemu_option_escape(&path_to_string(&vars_path)?)
                 ),
             ]);
@@ -1345,12 +1351,12 @@ impl QemuBackend {
             return Ok((code.clone(), vars.clone()));
         }
         let code_candidates = [
-            "/usr/share/OVMF/OVMF_CODE_4M.fd",
-            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd",
+            "/usr/share/OVMF/OVMF_CODE.secboot.fd",
         ];
         let vars_candidates = [
-            "/usr/share/OVMF/OVMF_VARS_4M.fd",
-            "/usr/share/OVMF/OVMF_VARS.fd",
+            "/usr/share/OVMF/OVMF_VARS_4M.ms.fd",
+            "/usr/share/OVMF/OVMF_VARS.ms.fd",
         ];
         let mut code = None;
         for candidate in code_candidates {
