@@ -6,10 +6,10 @@ The older `scripts/demo/record.sh` tmux/asciinema harness is retained only as a 
 
 ## Prerequisites
 
-Build the CLI first:
+Build the release CLI first:
 
 ```sh
-cargo build -p winlane-cli
+cargo build --release -p winlane-cli
 ```
 
 Required host tools: Xvfb, ffmpeg/ffprobe, python3, `xwininfo`, and `xdpyinfo`. The harness does not install QEMU, Windows, drivers, X11 tools, or ffmpeg; kitty is downloaded into the user cache rather than system-installed.

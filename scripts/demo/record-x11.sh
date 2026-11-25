@@ -108,7 +108,7 @@ done
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/../.." && pwd)
 if [[ -z $winlane_bin ]]; then
-  winlane_bin="$repo_root/target/debug/winlane"
+  winlane_bin="$repo_root/target/release/winlane"
 fi
 if [[ -z $driver_script ]]; then
   driver_script="$script_dir/drive-demo.sh"
@@ -131,7 +131,7 @@ driver_script=$(abs_path "$driver_script")
 kitty_bin=$(abs_path "$kitty_bin")
 
 [[ -f $golden_image && -r $golden_image ]] || fail "golden image is not a readable file: $golden_image"
-[[ -x $winlane_bin ]] || fail "winlane binary missing; run: cargo build -p winlane-cli"
+[[ -x $winlane_bin ]] || fail "winlane release binary missing; run: cargo build --release -p winlane-cli"
 [[ -x $driver_script ]] || fail "driver script is not executable: $driver_script"
 [[ -x $kitty_bin ]] || fail "kitty binary is not executable: $kitty_bin"
 kitty_version_output=$("$kitty_bin" --version 2>/dev/null || true)
