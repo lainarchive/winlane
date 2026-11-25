@@ -166,6 +166,84 @@ fn tool_call_message(name: &str, arguments: serde_json::Value) -> serde_json::Va
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_wait_uses_guest_agent_ready_ipc_and_returns_ready_json() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind control socket");
+    let machine = referenced_machine();
+    let expected = machine.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept wait client");
+        let request =
+            write_control_response(stream, json!({"ready": true, "state": "running"})).await;
+        assert_eq!(
+            request,
+            ControlRequest::GuestAgentReady { machine: expected }
+        );
+    });
+
+    let mcp = McpControlPlane::new(&socket_path);
+    let result = mcp
+        .dispatch(
+            "machine_wait",
+            &json!({
+                "machine": serde_json::to_value(machine).expect("encode machine"),
+                "for": "guest-agent",
+                "timeout_seconds": 1,
+            }),
+        )
+        .await
+        .expect("machine wait");
+    assert_eq!(result["ready"], true);
+    assert_eq!(result["for"], "guest-agent");
+    assert_eq!(result["state"], "running");
+    server.await.expect("server task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn machine_wait_timeout_returns_ready_false_json() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind control socket");
+    let machine = referenced_machine();
+    let expected = machine.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request =
+                write_control_response(stream, json!({"ready": false, "state": "running"})).await;
+            assert_eq!(
+                request,
+                ControlRequest::GuestAgentReady {
+                    machine: expected.clone()
+                }
+            );
+        }
+    });
+
+    let mcp = McpControlPlane::new(&socket_path);
+    let result = mcp
+        .dispatch(
+            "machine_wait",
+            &json!({
+                "machine": serde_json::to_value(machine).expect("encode machine"),
+                "for": "guest-agent",
+                "timeout_seconds": 1,
+            }),
+        )
+        .await
+        .expect("machine wait timeout result");
+    assert_eq!(result["ready"], false);
+    assert_eq!(result["for"], "guest-agent");
+    assert_eq!(result["state"], "running");
+    assert_eq!(result["error"], "timeout");
+    assert!(result["elapsed_ms"].as_u64().expect("elapsed") >= 1000);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn name_string_evidence_records_resolved_machine_id_with_one_list_lookup() {
     let root = tempfile::tempdir().expect("temporary directory");
     let socket_path = root.path().join("control.sock");

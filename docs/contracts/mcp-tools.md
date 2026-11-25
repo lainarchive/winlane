@@ -11,6 +11,7 @@ The first tool set is intentionally close to machine control, not a high-level t
 | `machine_status` | Read machine state and boot readiness |
 | `machine_start` | Start an existing machine |
 | `machine_stop` | Ask the guest or hypervisor to stop cleanly |
+| `machine_wait` | Wait for guest-agent readiness with a bounded timeout |
 | `screenshot` | Capture a full-resolution frame |
 | `click` | Click guest pixel coordinates |
 | `move` | Move the guest pointer |
@@ -34,6 +35,7 @@ Rules:
 - `ui_tree` output states the UI Automation `view` used. Callers must pass the same `view` value to `ui_invoke` or `ui_set_text` for paths derived from that tree; mixing control-view and raw-view paths can target the wrong node or fail.
 - `runtime_id` is optional on `ui_invoke` and `ui_set_text`. When supplied, the helper resolves the path with the selected view, compares the resolved element runtime id, and fails if it differs or cannot be read. Path-only calls are accepted for compatibility but are not identity-checked; callers should pass `runtimeId` from the same fresh tree/view.
 - `timeout_ms` is optional on `ui_invoke`, `ui_set_text`, and `process_run`; it is bounded to 1–600000 milliseconds and defaults to 30000.
+- `machine_wait` requires `for` to be `guest-agent`; `timeout_seconds` is optional, bounded to 1–600 seconds, and defaults to 60. Timeout is a completed wait result containing `ready:false` and `error:"timeout"`, while invalid input and control-plane failures remain tool errors.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.
 - Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string. Name strings resolve through `machine_list`; absent or ambiguous names are invalid.
