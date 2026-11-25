@@ -737,9 +737,7 @@ impl QemuBackend {
                 .ovmf_vars_path
                 .clone()
                 .unwrap_or_else(|| state_dir.join(OVMF_VARS_FILE));
-            tokio::fs::copy(checkpoint_dir.join(OVMF_VARS_FILE), &target)
-                .await
-                .map_err(CoreError::io("restore firmware state", &target))?;
+            replace_file_atomically(&checkpoint_dir.join(OVMF_VARS_FILE), &target).await?;
             record.ovmf_vars_path = Some(target);
         }
         if metadata.tpm_state_included {
@@ -747,15 +745,7 @@ impl QemuBackend {
                 .tpm_state_dir
                 .clone()
                 .unwrap_or_else(|| state_dir.join(TPM_DIR));
-            if tokio::fs::try_exists(&target)
-                .await
-                .map_err(CoreError::io("check tpm state directory", &target))?
-            {
-                tokio::fs::remove_dir_all(&target)
-                    .await
-                    .map_err(CoreError::io("clear tpm state directory", &target))?;
-            }
-            copy_dir_all(&checkpoint_dir.join(TPM_DIR), &target).await?;
+            replace_dir_contents(&checkpoint_dir.join(TPM_DIR), &target).await?;
             record.tpm_state_dir = Some(target);
         }
         if metadata.vm_state_included {
@@ -1781,6 +1771,73 @@ async fn copy_optional_dir(source: Option<&Path>, target: &Path) -> CoreResult<b
     Ok(true)
 }
 
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+async fn remove_dir_if_exists(path: &Path) -> CoreResult<()> {
+    if tokio::fs::try_exists(path)
+        .await
+        .map_err(CoreError::io("check temporary restore directory", path))?
+    {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(CoreError::io("remove temporary restore directory", path))?;
+    }
+    Ok(())
+}
+
+async fn replace_file_atomically(source: &Path, target: &Path) -> CoreResult<()> {
+    let staging = sibling_path(target, ".winlane-new");
+    if tokio::fs::try_exists(&staging)
+        .await
+        .map_err(CoreError::io("check staged restore file", &staging))?
+    {
+        tokio::fs::remove_file(&staging)
+            .await
+            .map_err(CoreError::io("remove stale staged restore file", &staging))?;
+    }
+    tokio::fs::copy(source, &staging)
+        .await
+        .map_err(CoreError::io("stage restored file", &staging))?;
+    if let Err(error) = tokio::fs::rename(&staging, target).await {
+        let _ = tokio::fs::remove_file(&staging).await;
+        return Err(CoreError::io("replace restored file", target)(error));
+    }
+    Ok(())
+}
+
+async fn replace_dir_contents(source: &Path, target: &Path) -> CoreResult<()> {
+    let staging = sibling_path(target, ".winlane-new");
+    let backup = sibling_path(target, ".winlane-old");
+    remove_dir_if_exists(&staging).await?;
+    remove_dir_if_exists(&backup).await?;
+    if let Err(error) = copy_dir_all(source, &staging).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(error);
+    }
+    let target_exists = tokio::fs::try_exists(target)
+        .await
+        .map_err(CoreError::io("check restore target directory", target))?;
+    if target_exists && let Err(error) = tokio::fs::rename(target, &backup).await {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(CoreError::io("move aside restore target directory", target)(error));
+    }
+    if let Err(error) = tokio::fs::rename(&staging, target).await {
+        if target_exists {
+            let _ = tokio::fs::rename(&backup, target).await;
+        }
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(CoreError::io("replace restore target directory", target)(
+            error,
+        ));
+    }
+    let _ = tokio::fs::remove_dir_all(&backup).await;
+    Ok(())
+}
+
 async fn copy_dir_all(source: &Path, target: &Path) -> CoreResult<()> {
     let mut stack = vec![(source.to_path_buf(), target.to_path_buf())];
     while let Some((source_dir, target_dir)) = stack.pop() {
@@ -1828,6 +1885,40 @@ mod tests {
         let dimensions = parse_ppm_dimensions(bytes).expect("PPM should parse");
         assert_eq!(dimensions.width, 320);
         assert_eq!(dimensions.height, 200);
+    }
+
+    #[tokio::test]
+    async fn restore_replacement_helpers_replace_file_and_directory_contents() {
+        let root = tempfile::tempdir().expect("temporary restore root");
+        let source_file = root.path().join("source-file");
+        let target_file = root.path().join("target-file");
+        std::fs::write(&source_file, b"new").expect("write source file");
+        std::fs::write(&target_file, b"old").expect("write target file");
+        replace_file_atomically(&source_file, &target_file)
+            .await
+            .expect("replace file");
+        assert_eq!(
+            std::fs::read(&target_file).expect("read target file"),
+            b"new"
+        );
+        assert!(!sibling_path(&target_file, ".winlane-new").exists());
+
+        let source_dir = root.path().join("source-dir");
+        let target_dir = root.path().join("target-dir");
+        std::fs::create_dir_all(source_dir.join("nested")).expect("create source dir");
+        std::fs::create_dir_all(&target_dir).expect("create target dir");
+        std::fs::write(source_dir.join("nested/value"), b"new").expect("write source value");
+        std::fs::write(target_dir.join("obsolete"), b"old").expect("write obsolete value");
+        replace_dir_contents(&source_dir, &target_dir)
+            .await
+            .expect("replace directory");
+        assert_eq!(
+            std::fs::read(target_dir.join("nested/value")).expect("read replacement value"),
+            b"new"
+        );
+        assert!(!target_dir.join("obsolete").exists());
+        assert!(!sibling_path(&target_dir, ".winlane-new").exists());
+        assert!(!sibling_path(&target_dir, ".winlane-old").exists());
     }
 
     #[test]
