@@ -1,6 +1,7 @@
 //! Narrow command line entrypoint for machine control, guest control, and terminal viewing.
 
 pub mod args;
+pub mod doctor;
 pub mod evidence;
 pub mod guest;
 pub mod live;
@@ -11,9 +12,10 @@ use std::io::Write as _;
 use thiserror::Error;
 
 pub use args::{
-    Command, CreateArgs, DaemonArgs, GuestCommand, MachineArgs, MachineCommand, McpArgs, USAGE,
-    VIEW_USAGE, ViewArgs, parse_args,
+    Command, CreateArgs, DaemonArgs, DoctorArgs, GuestCommand, MachineArgs, MachineCommand,
+    McpArgs, USAGE, VIEW_USAGE, ViewArgs, parse_args,
 };
+pub use doctor::run_doctor;
 pub use evidence::run_evidence_command;
 pub use guest::run_guest_command;
 pub use live::{LiveViewConfig, capture_transient_frame, run_live_view};
@@ -59,6 +61,11 @@ pub async fn run(args: Vec<String>) -> CliResult<()> {
         }
         Command::View(view) => run_live_view(LiveViewConfig::from_args(view).await?).await,
         Command::Daemon(daemon) => run_daemon(daemon).await,
+        Command::Doctor(doctor) => {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            run_doctor(&doctor, &mut output)
+        }
         Command::Machine(machine) => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
