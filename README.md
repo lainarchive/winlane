@@ -285,7 +285,7 @@ cargo run --release -p winlane-cli -- guest invoke \
 
 Node paths are snapshot-scoped. A path such as `0/1/3` can point somewhere else after windows open, close, or reorder. Generation checking is not reliable across separate guest connections, so use a fresh tree immediately before invoking and pass the runtime id when available.
 
-Import and export files explicitly:
+Import and export files or workspace directories explicitly. Workspace transfer is archive-based and bounded; pass `--workspace` for directories and `--overwrite` to replace an existing destination. Without `--overwrite`, an existing non-empty workspace destination is preserved and an existing file destination is not replaced.
 
 ```sh
 cargo run --release -p winlane-cli -- guest import \
@@ -299,9 +299,16 @@ cargo run --release -p winlane-cli -- guest export \
   --control-socket /tmp/winlane-control.sock \
   --guest-path 'C:\Windows\Temp\payload.txt' \
   --host-path ./payload.out.txt
+
+cargo run --release -p winlane-cli -- guest import \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
+  --workspace \
+  --host-path ./workspace \
+  --guest-path 'C:\workspace'
 ```
 
-There is no shared clipboard and no host folder pass-through.
+File transfer is capped at 512 MiB per file. Workspace transfer is capped at 10,000 archive members, 512 MiB total file bytes, and 256 MiB per member. Links are rejected, archive path traversal is rejected, and transfer uses bounded chunks rather than whole-file memory buffering. There is no shared clipboard and no host folder pass-through.
 
 ## MCP
 

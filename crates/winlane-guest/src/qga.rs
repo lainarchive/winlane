@@ -209,7 +209,17 @@ impl<T: QgaTransport> QgaClient<T> {
         Ok(())
     }
 
+    pub fn file_flush(&mut self, handle: u64) -> QgaResult<()> {
+        self.execute("guest-file-flush", json!({ "handle": handle }))?;
+        Ok(())
+    }
+
     pub fn file_write(&mut self, handle: u64, bytes: &[u8]) -> QgaResult<()> {
+        self.file_write_chunks(handle, bytes)?;
+        self.file_flush(handle)
+    }
+
+    pub(crate) fn file_write_chunks(&mut self, handle: u64, bytes: &[u8]) -> QgaResult<()> {
         for chunk in bytes.chunks(FILE_CHUNK_BYTES) {
             self.execute(
                 "guest-file-write",
@@ -220,7 +230,6 @@ impl<T: QgaTransport> QgaClient<T> {
                 }),
             )?;
         }
-        self.execute("guest-file-flush", json!({ "handle": handle }))?;
         Ok(())
     }
 

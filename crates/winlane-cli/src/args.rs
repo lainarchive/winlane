@@ -33,8 +33,8 @@ pub const GUEST_UI_TREE_USAGE: &str = "usage: winlane guest ui-tree (--machine-j
 pub const GUEST_INVOKE_USAGE: &str = "usage: winlane guest invoke (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH [--view control|raw] [--runtime-id ID]";
 pub const GUEST_SET_TEXT_USAGE: &str = "usage: winlane guest set-text (--machine-json JSON | --machine NAME) [--control-socket PATH] --node PATH --text TEXT [--view control|raw] [--runtime-id ID]";
 pub const GUEST_RUN_USAGE: &str = "usage: winlane guest run (--machine-json JSON | --machine NAME) [--control-socket PATH] --command ABSOLUTE_GUEST_PATH [--arg ARG]... [--timeout-ms N]";
-pub const GUEST_IMPORT_USAGE: &str = "usage: winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH";
-pub const GUEST_EXPORT_USAGE: &str = "usage: winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH";
+pub const GUEST_IMPORT_USAGE: &str = "usage: winlane guest import (--machine-json JSON | --machine NAME) [--control-socket PATH] --host-path PATH --guest-path PATH [--workspace] [--overwrite]";
+pub const GUEST_EXPORT_USAGE: &str = "usage: winlane guest export (--machine-json JSON | --machine NAME) [--control-socket PATH] --guest-path PATH --host-path PATH [--workspace] [--overwrite]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewArgs {
@@ -213,6 +213,8 @@ pub struct GuestImportArgs {
     pub machine: GuestMachineArgs,
     pub host_path: PathBuf,
     pub guest_path: String,
+    pub workspace: bool,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +222,8 @@ pub struct GuestExportArgs {
     pub machine: GuestMachineArgs,
     pub guest_path: String,
     pub host_path: PathBuf,
+    pub workspace: bool,
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1040,7 +1044,7 @@ fn parse_guest_run_args(args: &[String]) -> Result<GuestRunArgs, CliError> {
 }
 
 fn parse_guest_import_args(args: &[String]) -> Result<GuestImportArgs, CliError> {
-    let options = ParsedOptions::parse(
+    let options = ParsedOptions::parse_with_booleans(
         args,
         GUEST_IMPORT_USAGE,
         &[
@@ -1050,6 +1054,7 @@ fn parse_guest_import_args(args: &[String]) -> Result<GuestImportArgs, CliError>
             "--host-path",
             "--guest-path",
         ],
+        &["--workspace", "--overwrite"],
     )?;
     Ok(GuestImportArgs {
         machine: parse_guest_machine(&options, GUEST_IMPORT_USAGE)?,
@@ -1057,11 +1062,13 @@ fn parse_guest_import_args(args: &[String]) -> Result<GuestImportArgs, CliError>
         guest_path: options
             .required("--guest-path", GUEST_IMPORT_USAGE)?
             .to_string(),
+        workspace: options.one("--workspace", GUEST_IMPORT_USAGE)?.is_some(),
+        overwrite: options.one("--overwrite", GUEST_IMPORT_USAGE)?.is_some(),
     })
 }
 
 fn parse_guest_export_args(args: &[String]) -> Result<GuestExportArgs, CliError> {
-    let options = ParsedOptions::parse(
+    let options = ParsedOptions::parse_with_booleans(
         args,
         GUEST_EXPORT_USAGE,
         &[
@@ -1071,6 +1078,7 @@ fn parse_guest_export_args(args: &[String]) -> Result<GuestExportArgs, CliError>
             "--guest-path",
             "--host-path",
         ],
+        &["--workspace", "--overwrite"],
     )?;
     Ok(GuestExportArgs {
         machine: parse_guest_machine(&options, GUEST_EXPORT_USAGE)?,
@@ -1078,6 +1086,8 @@ fn parse_guest_export_args(args: &[String]) -> Result<GuestExportArgs, CliError>
             .required("--guest-path", GUEST_EXPORT_USAGE)?
             .to_string(),
         host_path: PathBuf::from(options.required("--host-path", GUEST_EXPORT_USAGE)?),
+        workspace: options.one("--workspace", GUEST_EXPORT_USAGE)?.is_some(),
+        overwrite: options.one("--overwrite", GUEST_EXPORT_USAGE)?.is_some(),
     })
 }
 
@@ -1091,10 +1101,24 @@ impl<'a> ParsedOptions<'a> {
         usage: &str,
         value_flags: &[&str],
     ) -> Result<ParsedOptions<'a>, CliError> {
+        Self::parse_with_booleans(args, usage, value_flags, &[])
+    }
+
+    fn parse_with_booleans(
+        args: &'a [String],
+        usage: &str,
+        value_flags: &[&str],
+        boolean_flags: &[&str],
+    ) -> Result<ParsedOptions<'a>, CliError> {
         let mut values = HashMap::new();
         let mut index = 0;
         while index < args.len() {
             let flag = args[index].as_str();
+            if boolean_flags.contains(&flag) {
+                values.entry(flag).or_insert_with(Vec::new).push("true");
+                index += 1;
+                continue;
+            }
             if !value_flags.contains(&flag) {
                 return Err(CliError::Usage(format!("unknown flag {flag}; {usage}")));
             }
@@ -1709,6 +1733,60 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(export, Command::Guest(GuestCommand::Export(_))));
+    }
+
+    #[test]
+    fn guest_transfer_workspace_and_overwrite_flags_parse_once() {
+        let import = parse_args(&[
+            "guest".to_string(),
+            "import".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--host-path".to_string(),
+            "/tmp/project".to_string(),
+            "--guest-path".to_string(),
+            r"C:\workspace".to_string(),
+            "--workspace".to_string(),
+            "--overwrite".to_string(),
+        ])
+        .unwrap();
+        let Command::Guest(GuestCommand::Import(args)) = import else {
+            panic!("expected import command");
+        };
+        assert!(args.workspace);
+        assert!(args.overwrite);
+
+        let export = parse_args(&[
+            "guest".to_string(),
+            "export".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--guest-path".to_string(),
+            r"C:\workspace".to_string(),
+            "--host-path".to_string(),
+            "/tmp/project".to_string(),
+            "--workspace".to_string(),
+        ])
+        .unwrap();
+        let Command::Guest(GuestCommand::Export(args)) = export else {
+            panic!("expected export command");
+        };
+        assert!(args.workspace);
+        assert!(!args.overwrite);
+
+        let duplicate = parse_args(&[
+            "guest".to_string(),
+            "import".to_string(),
+            "--machine-json".to_string(),
+            "{}".to_string(),
+            "--host-path".to_string(),
+            "/tmp/project".to_string(),
+            "--guest-path".to_string(),
+            r"C:\workspace".to_string(),
+            "--workspace".to_string(),
+            "--workspace".to_string(),
+        ]);
+        assert!(matches!(duplicate, Err(CliError::Usage(_))));
     }
 
     #[test]

@@ -461,6 +461,8 @@ impl McpControlPlane {
             SemanticOperation::Import {
                 host_path,
                 guest_path,
+                workspace: optional_bool(input, "workspace")?.unwrap_or(false),
+                overwrite: optional_bool(input, "overwrite")?.unwrap_or(false),
             },
         )
         .await
@@ -475,6 +477,8 @@ impl McpControlPlane {
             SemanticOperation::Export {
                 guest_path,
                 host_path,
+                workspace: optional_bool(input, "workspace")?.unwrap_or(false),
+                overwrite: optional_bool(input, "overwrite")?.unwrap_or(false),
             },
         )
         .await
@@ -532,10 +536,14 @@ enum SemanticOperation {
     Import {
         host_path: PathBuf,
         guest_path: String,
+        workspace: bool,
+        overwrite: bool,
     },
     Export {
         guest_path: String,
         host_path: PathBuf,
+        workspace: bool,
+        overwrite: bool,
     },
 }
 
@@ -577,15 +585,49 @@ fn execute_semantic_operation<T: QgaTransport>(
         SemanticOperation::Import {
             host_path,
             guest_path,
-        } => Ok(serde_json::to_value(
-            control.import_file_blocking(&host_path, &guest_path)?,
-        )?),
+            workspace,
+            overwrite,
+        } => {
+            let value = if workspace {
+                serde_json::to_value(winlane_guest::transfer::import_workspace_blocking(
+                    control,
+                    &host_path,
+                    &guest_path,
+                    overwrite,
+                )?)?
+            } else {
+                serde_json::to_value(winlane_guest::transfer::import_file_blocking(
+                    control,
+                    &host_path,
+                    &guest_path,
+                    overwrite,
+                )?)?
+            };
+            Ok(value)
+        }
         SemanticOperation::Export {
             guest_path,
             host_path,
-        } => Ok(serde_json::to_value(
-            control.export_file_blocking(&guest_path, &host_path)?,
-        )?),
+            workspace,
+            overwrite,
+        } => {
+            let value = if workspace {
+                serde_json::to_value(winlane_guest::transfer::export_workspace_blocking(
+                    control,
+                    &guest_path,
+                    &host_path,
+                    overwrite,
+                )?)?
+            } else {
+                serde_json::to_value(winlane_guest::transfer::export_file_blocking(
+                    control,
+                    &guest_path,
+                    &host_path,
+                    overwrite,
+                )?)?
+            };
+            Ok(value)
+        }
     }
 }
 
@@ -784,21 +826,25 @@ pub fn tool_definitions() -> Value {
             },
             "required": ["machine", "command"]
         }},
-        {"name": "file_import", "description": "Copy a host file into the guest", "inputSchema": {
+        {"name": "file_import", "description": "Copy a host file or workspace directory into the guest", "inputSchema": {
             "type": "object",
             "properties": {
                 "machine": machine_ref,
                 "host_path": {"type": "string"},
-                "guest_path": {"type": "string"}
+                "guest_path": {"type": "string"},
+                "workspace": {"type": "boolean", "default": false},
+                "overwrite": {"type": "boolean", "default": false}
             },
             "required": ["machine", "host_path", "guest_path"]
         }},
-        {"name": "file_export", "description": "Copy a guest file to the host", "inputSchema": {
+        {"name": "file_export", "description": "Copy a guest file or workspace directory to the host", "inputSchema": {
             "type": "object",
             "properties": {
                 "machine": machine_ref,
                 "guest_path": {"type": "string"},
-                "host_path": {"type": "string"}
+                "host_path": {"type": "string"},
+                "workspace": {"type": "boolean", "default": false},
+                "overwrite": {"type": "boolean", "default": false}
             },
             "required": ["machine", "guest_path", "host_path"]
         }}
