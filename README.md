@@ -83,13 +83,13 @@ winlane does not download or redistribute Windows. Evaluation media has its own 
 ## Build
 
 ```sh
-cargo build --workspace
+cargo build --release --workspace
 ```
 
 ## Provision a golden image
 
 ```sh
-cargo run -p winlane-provision -- provision \
+cargo run --release -p winlane-provision -- provision \
   --name win11-alpha \
   --iso /path/to/windows-11-enterprise-eval-x64-en-us.iso \
   --virtio-iso /path/to/virtio-win.iso \
@@ -103,7 +103,7 @@ The output golden image is written under the artifact root as `win11-alpha/golde
 ## Start the control daemon
 
 ```sh
-cargo run -p winlane-cli -- daemon \
+cargo run --release -p winlane-cli -- daemon \
   --root /path/to/winlane-runtime \
   --control-socket /tmp/winlane-control.sock
 ```
@@ -113,12 +113,12 @@ Keep that process running in its own terminal or service manager.
 ## Create and boot a disposable machine
 
 ```sh
-machine=$(cargo run -p winlane-cli -- machine create \
+machine=$(cargo run --release -p winlane-cli -- machine create \
   --control-socket /tmp/winlane-control.sock \
   --name demo-1 \
   --base-image /path/to/winlane-state/win11-alpha/golden.qcow2)
 
-cargo run -p winlane-cli -- machine start \
+cargo run --release -p winlane-cli -- machine start \
   --control-socket /tmp/winlane-control.sock \
   --machine demo-1
 ```
@@ -128,19 +128,19 @@ cargo run -p winlane-cli -- machine start \
 List machines known under the daemon root. The output is one compact JSON array:
 
 ```sh
-cargo run -p winlane-cli -- machine list \
+cargo run --release -p winlane-cli -- machine list \
   --control-socket /tmp/winlane-control.sock
 ```
 
 Clone a stopped machine or destroy it explicitly:
 
 ```sh
-clone=$(cargo run -p winlane-cli -- machine clone \
+clone=$(cargo run --release -p winlane-cli -- machine clone \
   --control-socket /tmp/winlane-control.sock \
   --machine demo-1 \
   --name demo-1-copy)
 
-cargo run -p winlane-cli -- machine destroy \
+cargo run --release -p winlane-cli -- machine destroy \
   --control-socket /tmp/winlane-control.sock \
   --machine demo-1-copy
 ```
@@ -148,7 +148,7 @@ cargo run -p winlane-cli -- machine destroy \
 ## Watch and control the display
 
 ```sh
-cargo run -p winlane-cli -- view \
+cargo run --release -p winlane-cli -- view \
   --control-socket /tmp/winlane-control.sock \
   --machine demo-1
 ```
@@ -164,7 +164,7 @@ Outside Kitty-protocol terminals winlane uses half-blocks only as a preview fall
 Run a process:
 
 ```sh
-cargo run -p winlane-cli -- guest run \
+cargo run --release -p winlane-cli -- guest run \
   --machine demo-1 \
   --control-socket /tmp/winlane-control.sock \
   --command 'C:\Windows\System32\cmd.exe' \
@@ -175,7 +175,7 @@ cargo run -p winlane-cli -- guest run \
 Read the UI Automation tree:
 
 ```sh
-cargo run -p winlane-cli -- guest ui-tree \
+cargo run --release -p winlane-cli -- guest ui-tree \
   --machine demo-1 \
   --control-socket /tmp/winlane-control.sock \
   --max-depth 8 \
@@ -187,7 +187,7 @@ The tree output states its `view`. UI operations default to `--view control`; pa
 Invoke an element from the current tree:
 
 ```sh
-cargo run -p winlane-cli -- guest invoke \
+cargo run --release -p winlane-cli -- guest invoke \
   --machine demo-1 \
   --control-socket /tmp/winlane-control.sock \
   --node 0/1/3
@@ -198,13 +198,13 @@ Node paths are snapshot-scoped. A path such as `0/1/3` can point somewhere else 
 Import and export files explicitly:
 
 ```sh
-cargo run -p winlane-cli -- guest import \
+cargo run --release -p winlane-cli -- guest import \
   --machine demo-1 \
   --control-socket /tmp/winlane-control.sock \
   --host-path ./payload.txt \
   --guest-path 'C:\Windows\Temp\payload.txt'
 
-cargo run -p winlane-cli -- guest export \
+cargo run --release -p winlane-cli -- guest export \
   --machine demo-1 \
   --control-socket /tmp/winlane-control.sock \
   --guest-path 'C:\Windows\Temp\payload.txt' \
@@ -218,7 +218,7 @@ There is no shared clipboard and no host folder pass-through.
 Run the stdio MCP server against the control daemon:
 
 ```sh
-cargo run -p winlane-cli -- mcp \
+cargo run --release -p winlane-cli -- mcp \
   --control-socket /tmp/winlane-control.sock \
   --evidence-dir /path/to/evidence
 ```
@@ -230,11 +230,11 @@ Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and
 Export or inspect evidence. Export writes `events.jsonl` plus the content-addressed `blobs/` directory:
 
 ```sh
-cargo run -p winlane-cli -- evidence export \
+cargo run --release -p winlane-cli -- evidence export \
   --evidence-dir /path/to/evidence \
   --output /path/to/evidence-export
 
-cargo run -p winlane-cli -- evidence tail \
+cargo run --release -p winlane-cli -- evidence tail \
   --evidence-dir /path/to/evidence \
   --limit 20
 ```
@@ -242,7 +242,7 @@ cargo run -p winlane-cli -- evidence tail \
 ## Stop the machine
 
 ```sh
-cargo run -p winlane-cli -- machine stop \
+cargo run --release -p winlane-cli -- machine stop \
   --control-socket /tmp/winlane-control.sock \
   --machine-json "$machine"
 ```

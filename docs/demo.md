@@ -7,7 +7,7 @@
 Build the CLI first:
 
 ```sh
-cargo build -p winlane-cli
+cargo build --release -p winlane-cli
 ```
 
 Install tmux and asciinema with the host package manager. `agg` and ffmpeg are optional: if both exist, the script also writes a gif and mp4.
