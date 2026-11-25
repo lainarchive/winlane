@@ -382,8 +382,8 @@ The security boundary is the VM. Host clipboard sharing, host folder sharing, an
 
 ```sh
 cargo fmt --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
 Windows integration claims must come from real runs. Do not document simulated provisioning, fake UIA trees, or fixture-only behavior as live validation.
