@@ -5,6 +5,7 @@ The first tool set is intentionally close to machine control, not a high-level t
 | Tool | Purpose |
 |---|---|
 | `machine_create` | Create a disposable machine from a golden image or installer ISO |
+| `machine_list` | List machine handles known to the control daemon |
 | `machine_clone` | Clone an existing machine under a new name |
 | `machine_destroy` | Destroy a machine and its disposable state |
 | `machine_status` | Read machine state and boot readiness |
@@ -33,3 +34,4 @@ Rules:
 - `ui_tree` output states the UI Automation `view` used. Callers must pass the same `view` value to `ui_invoke` or `ui_set_text` for paths derived from that tree; mixing control-view and raw-view paths can target the wrong node or fail.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
 - Tool schemas are snapshot-tested before implementation details grow around them.
+- Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string. Name strings resolve through `machine_list`; absent or ambiguous names are invalid.

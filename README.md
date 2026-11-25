@@ -36,6 +36,7 @@ Validated on real Windows 11 Enterprise Evaluation guests:
 - QEMU lifecycle and checkpoint behavior passed real QEMU/KVM tests on blank machines
 - a running Windows checkpoint restored QEMU memory/device and disk state; the restored frame hash exactly matched the pre-change checkpoint-state frame
 - a stopped Windows machine clone booted and exposed a ready guest agent
+- independent clone validation passed on real Windows machines: the clone had no backing file, kept a pre-clone guest marker after source destruction, and never received a post-clone source marker
 - isolated networking produced no QEMU user NAT, `netdev`, or virtio-net device; the guest had no non-loopback adapter, route, DNS, or outbound connectivity
 - NAT networking produced a VirtIO adapter, DHCP address `10.0.2.15/24`, working DNS, host HTTP access, and a real `HTTP/1.1 200 OK` response from `example.com`
 - pointer movement reached the Windows desktop and produced visible cursor/tooltip state
@@ -214,7 +215,7 @@ cargo run -p winlane-cli -- mcp \
   --evidence-dir /path/to/evidence
 ```
 
-The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text. If a tool operation succeeds but evidence recording fails, the MCP result stays successful and carries an explicit `evidence_error` field instead of misreporting the machine operation as failed.
+The hardware-plane MCP tools cover machine creation, listing, cloning, destruction, lifecycle, screenshots, input, scrolling, and checkpoints. `machine_list` returns the same machine-handle array as the CLI list command. Inputs with a top-level `machine` field accept either a full machine handle or an exact machine-name string; names are resolved through the control daemon on each call. With `--evidence-dir`, those operations append JSONL evidence events. Typed text is stored as hash plus length, not raw text. If a tool operation succeeds but evidence recording fails, the MCP result stays successful and carries an explicit `evidence_error` field instead of misreporting the machine operation as failed.
 
 Semantic guest MCP tools cover UI tree, invoke, set-text, process execution, and file transfer. Live validation covers real UI tree reads, invoke, set-text, process execution, file round trips, and restore-then-start. UI element paths are snapshot-scoped: read a fresh tree before invoking or writing a node. The semantic tools accept `view` as `control` (default) or `raw`; use the same view for the tree and for invoke/set-text paths derived from it. Raw-view support is implemented but not live-validated.
 
