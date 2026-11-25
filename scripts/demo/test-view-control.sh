@@ -39,7 +39,13 @@ if python3 scripts/demo/find_notepad_popup_button.py "$root/tree-truncated.json"
   exit 1
 fi
 cat >"$root/tree-popup.json" <<'EOF'
-{"ok":true,"truncated":false,"root":{"id":"0","children":[{"id":"0/1","name":"Got it","controlType":"Button","children":[]}]}}
+{"ok":true,"truncated":false,"root":{"id":"0","children":[{"id":"0/1","name":"Untitled - Notepad","controlType":"Window","children":[{"id":"0/1/0","name":"Got it","controlType":"Button","children":[]}]}]}}
 EOF
-[[ $(python3 scripts/demo/find_notepad_popup_button.py "$root/tree-popup.json") == '0/1' ]]
+[[ $(python3 scripts/demo/find_notepad_popup_button.py "$root/tree-popup.json") == '0/1/0' ]]
+cat >"$root/tree-no-notepad-popup.json" <<'EOF'
+{"ok":true,"truncated":false,"root":{"id":"0","children":[{"id":"0/1","name":"Other","controlType":"Window","children":[{"id":"0/1/0","name":"Got it","controlType":"Button","children":[]}]}]}}
+EOF
+if python3 scripts/demo/find_notepad_popup_button.py "$root/tree-no-notepad-popup.json" >/dev/null 2>&1; then
+  exit 1
+fi
 printf 'view control stop/ack regression passed\n'

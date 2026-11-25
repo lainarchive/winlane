@@ -21,13 +21,21 @@ def main():
         raise SystemExit(2)
     if tree.get("truncated"):
         raise SystemExit(3)
-    for node in walk(tree["root"]):
-        name = str(node.get("name") or "").strip().lower()
-        if node.get("controlType") == "Button" and name == "got it":
-            path = node.get("id")
-            if isinstance(path, str) and path:
-                print(path)
-                return
+    notepad_windows = [
+        node
+        for node in walk(tree["root"])
+        if node.get("controlType") == "Window" and "notepad" in str(node.get("name") or "").lower()
+    ]
+    if not notepad_windows:
+        raise SystemExit(4)
+    for window in notepad_windows:
+        for node in walk(window):
+            name = str(node.get("name") or "").strip().lower()
+            if node.get("controlType") == "Button" and name == "got it":
+                path = node.get("id")
+                if isinstance(path, str) and path:
+                    print(path)
+                    return
 
 
 if __name__ == "__main__":
