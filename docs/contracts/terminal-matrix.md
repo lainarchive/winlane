@@ -58,6 +58,27 @@ The renderer now uses PNG balanced compression. In the post-change end-to-end ha
 
 This benchmark uses synthetic local frame artifacts and a fast pseudo-terminal consumer. It does not claim Windows guest validation or real terminal-emulator decode throughput; real Kitty correctness remains covered by `scripts/validate-cropped-repaint.py` and the terminal matrix above.
 
+## Real terminal decode throughput
+
+`scripts/benchmark-terminal-decode.py` complements the fast pseudo-terminal benchmark by running the same deterministic whole-changing 1024x768 PPM frame stream through a real kitty 0.51.1 window under Xvfb. It launches the release viewer at requested 5, 15, and 30 fps, measures capture completion, viewer and kitty process-tree CPU/RSS, and verifies visible correctness by checking exact recent frame colors in an X11 screenshot.
+
+```sh
+cargo build --release --workspace
+python3 scripts/benchmark-terminal-decode.py --output-dir /tmp/winlane-terminal-decode
+```
+
+The recorded run on this Ubuntu 22.04 VM used the balanced-compression renderer and synthetic frames only:
+
+| Requested fps | Achieved captures/s | Capture deficit over measurement | Viewer CPU max | kitty CPU max | Viewer RSS max | kitty RSS max | Visible correctness |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 5 | 4.876 | 0.38 captures | 35.6% | 132.9% | 17,760 KiB | 280,372 KiB | passed; 43,132 exact recent-frame color pixels |
+| 15 | 14.172 | 2.57 captures | 79.0% | 217.2% | 17,760 KiB | 281,072 KiB | passed; 43,133 exact recent-frame color pixels |
+| 30 | 14.810 | 46.16 captures | 70.8% | 225.1% | 17,720 KiB | 285,260 KiB | passed; 43,132 exact recent-frame color pixels |
+
+Thus 5 fps is sustainable with headroom in real kitty, 15 fps is nearly sustained but already expensive, and requested 30 fps converged to about 14.8 captures/s in this workload. The capture deficit at 30 fps is observably throttled cadence/backpressure; the harness cannot distinguish terminal-internal queue drops from writes simply completing late. No renderer change was justified by this measurement: the remaining bottleneck is real terminal image decode/render cost plus the fake capture service (about 9 ms per capture), not escape-byte volume alone. The 5 fps default remains evidence-supported as the conservative default. Higher requested rates are useful on fast machines/terminals but are not guaranteed real-time rendering.
+
+This is a synthetic local frame-stream measurement, not Windows/QEMU validation, and the fake control plane's fixed artifact-generation cost means real guest-backed throughput may be lower. Ghostty and WezTerm were not measured in this lane because reproducible installs were not present on this VM; their prior correctness validation does not include throughput claims.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
