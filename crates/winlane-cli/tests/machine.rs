@@ -1,6 +1,9 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use winlane_cli::{MachineArgs, MachineCommand, run_machine_command};
+use winlane_cli::args::{GuestInvokeArgs, GuestMachineArgs};
+use winlane_cli::{
+    GuestCommand, MachineArgs, MachineCommand, run_guest_command, run_machine_command,
+};
 use winlane_contracts::{MachineHandle, MachineState};
 use winlane_ipc::{ControlRequest, ControlResponse};
 
@@ -223,5 +226,44 @@ async fn machine_name_resolution_errors_on_no_match_and_multiple_matches() {
             .expect_err("name resolution should fail");
         assert!(error.to_string().contains(expected), "{error}");
     }
+    server.await.expect("server task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guest_machine_name_resolves_through_control_list_before_qga_connect() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server = tokio::spawn(async move {
+        let listener = UnixListener::bind(server_socket).expect("bind control socket");
+        let (stream, _) = listener.accept().await.expect("accept list client");
+        let request = write_control_response(
+            stream,
+            serde_json::to_value(vec![machine()]).expect("encode machines"),
+        )
+        .await;
+        assert_eq!(request, ControlRequest::List);
+    });
+
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let command = GuestCommand::Invoke(GuestInvokeArgs {
+        machine: GuestMachineArgs {
+            control_socket: Some(socket_path),
+            machine_json: None,
+            machine_name: Some("builder".to_string()),
+        },
+        node: "0".to_string(),
+    });
+    let mut output = Vec::new();
+    let error = run_guest_command(&command, &mut output)
+        .await
+        .expect_err("missing qga socket should fail after list resolution");
+    drop(error);
     server.await.expect("server task");
 }

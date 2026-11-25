@@ -118,7 +118,7 @@ cargo run -p winlane-cli -- machine start \
   --machine demo-1
 ```
 
-`machine create` prints one JSON object. Machine lifecycle and view commands accept either `--machine-json "$machine"` or `--machine NAME`. Name resolution asks the control daemon to list machines and fails if the name is absent or ambiguous. Guest commands still require `--machine-json` because they connect directly to the guest agent socket.
+`machine create` prints one JSON object. Machine lifecycle and view commands accept either `--machine-json "$machine"` or `--machine NAME`. Name resolution asks the control daemon to list machines and fails if the name is absent or ambiguous. Guest commands also accept either form. With `--machine NAME`, they require `--control-socket PATH` for one control-list lookup, then connect directly to the resolved `state_dir/qga.sock` exactly as before.
 
 List machines known under the daemon root. The output is one compact JSON array:
 
@@ -156,7 +156,8 @@ Run a process:
 
 ```sh
 cargo run -p winlane-cli -- guest run \
-  --machine-json "$machine" \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
   --command 'C:\Windows\System32\cmd.exe' \
   --arg /c \
   --arg 'echo winlane-guest'
@@ -166,7 +167,8 @@ Read the UI Automation tree:
 
 ```sh
 cargo run -p winlane-cli -- guest ui-tree \
-  --machine-json "$machine" \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
   --max-depth 8 \
   --max-nodes 2000
 ```
@@ -175,7 +177,8 @@ Invoke an element from the current tree:
 
 ```sh
 cargo run -p winlane-cli -- guest invoke \
-  --machine-json "$machine" \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
   --node 0/1/3
 ```
 
@@ -185,12 +188,14 @@ Import and export files explicitly:
 
 ```sh
 cargo run -p winlane-cli -- guest import \
-  --machine-json "$machine" \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
   --host-path ./payload.txt \
   --guest-path 'C:\Windows\Temp\payload.txt'
 
 cargo run -p winlane-cli -- guest export \
-  --machine-json "$machine" \
+  --machine demo-1 \
+  --control-socket /tmp/winlane-control.sock \
   --guest-path 'C:\Windows\Temp\payload.txt' \
   --host-path ./payload.out.txt
 ```
