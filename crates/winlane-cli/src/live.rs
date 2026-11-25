@@ -24,7 +24,7 @@ use winlane_view::{
 };
 
 use crate::machine::resolve_machine;
-use crate::{CliResult, ViewArgs};
+use crate::{CliError, CliResult, ViewArgs};
 
 const INPUT_POLL_QUANTUM: Duration = Duration::from_millis(10);
 
@@ -53,26 +53,56 @@ impl LiveViewConfig {
     }
 }
 
-pub async fn capture_frame(
+#[derive(Debug)]
+pub struct CapturedFrame {
+    pub frame: Frame,
+    pub sha256: String,
+}
+
+/// Captures one transient live-view artifact. The artifact belongs to this
+/// capture call and is removed after the decode attempt, including failures.
+pub async fn capture_transient_frame(
     client: &UnixControlClient,
     machine: &MachineHandle,
-) -> CliResult<Frame> {
+) -> CliResult<CapturedFrame> {
     let result = client
         .invoke(&ControlRequest::CaptureFrame {
             machine: machine.clone(),
         })
         .await?;
-    let metadata: FrameRef = serde_json::from_value(result)?;
-    let bytes = tokio::fs::read(&metadata.blob_path).await?;
-    Ok(frame_from_artifact(&metadata, &bytes)?)
+    let blob_path = result
+        .get("blob_path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    let metadata_result = serde_json::from_value::<FrameRef>(result);
+    let mut outcome = match metadata_result {
+        Ok(metadata) => match tokio::fs::read(&metadata.blob_path).await {
+            Ok(bytes) => frame_from_artifact(&metadata, &bytes)
+                .map(|frame| CapturedFrame {
+                    frame,
+                    sha256: metadata.sha256,
+                })
+                .map_err(CliError::View),
+            Err(error) => Err(error.into()),
+        },
+        Err(error) => Err(error.into()),
+    };
+    if let Some(blob_path) = blob_path
+        && let Err(error) = tokio::fs::remove_file(blob_path).await
+        && outcome.is_ok()
+    {
+        outcome = Err(error.into());
+    }
+    outcome
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DisplayedFrame {
     plan: winlane_view::RenderPlan,
     frame_width: u32,
     frame_height: u32,
     crop: winlane_view::SourceRect,
+    sha256: String,
 }
 
 fn terminal_geometry(
@@ -120,29 +150,42 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
         fallback,
         config.zoom_percent,
     )?;
-    let mut last_frame = None;
+    let mut last_frame: Option<DisplayedFrame> = None;
     let mut next_capture = Instant::now();
 
     loop {
         if Instant::now() >= next_capture {
-            let frame = capture_frame(&session.client, &session.machine).await?;
-            let crop = session.zoom.rect_for(frame.width(), frame.height())?;
-            let visible_frame = frame.crop(crop)?;
-            let output =
-                render_frame_with_fallback(&visible_frame, session.viewport.geometry(), protocol)?;
-            output.write_to(&mut session.stdout)?;
-            session.write_fallback_label()?;
-            session.viewport.repaint_completed();
-            last_frame = Some(DisplayedFrame {
-                plan: output.plan,
-                frame_width: frame.width(),
-                frame_height: frame.height(),
+            let captured = capture_transient_frame(&session.client, &session.machine).await?;
+            let crop = session
+                .zoom
+                .rect_for(captured.frame.width(), captured.frame.height())?;
+            if frame_repaint_required(
+                last_frame.as_ref(),
+                &captured.sha256,
                 crop,
-            });
+                session.viewport.full_repaint_required(),
+            ) {
+                let visible_frame = captured.frame.crop(crop)?;
+                let output = render_frame_with_fallback(
+                    &visible_frame,
+                    session.viewport.geometry(),
+                    protocol,
+                )?;
+                output.write_to(&mut session.stdout)?;
+                session.write_fallback_label()?;
+                session.viewport.repaint_completed();
+                last_frame = Some(DisplayedFrame {
+                    plan: output.plan,
+                    frame_width: captured.frame.width(),
+                    frame_height: captured.frame.height(),
+                    crop,
+                    sha256: captured.sha256,
+                });
+            }
             next_capture = Instant::now() + config.frame_interval;
         }
 
-        if session.drain_events(last_frame).await? {
+        if session.drain_events(last_frame.as_ref()).await? {
             return Ok(());
         }
         tokio::time::sleep(INPUT_POLL_QUANTUM).await;
@@ -184,7 +227,7 @@ impl LiveSession {
         })
     }
 
-    async fn drain_events(&mut self, last_frame: Option<DisplayedFrame>) -> CliResult<bool> {
+    async fn drain_events(&mut self, last_frame: Option<&DisplayedFrame>) -> CliResult<bool> {
         while event::poll(Duration::ZERO)? {
             let terminal_event = event::read()?;
             if self.handle_event(terminal_event, last_frame).await? {
@@ -197,7 +240,7 @@ impl LiveSession {
     async fn handle_event(
         &mut self,
         terminal_event: Event,
-        last_frame: Option<DisplayedFrame>,
+        last_frame: Option<&DisplayedFrame>,
     ) -> CliResult<bool> {
         match terminal_event {
             Event::Key(key_event) => {
@@ -247,7 +290,7 @@ impl LiveSession {
     async fn forward_input(
         &mut self,
         input: ViewerInput,
-        displayed: DisplayedFrame,
+        displayed: &DisplayedFrame,
     ) -> CliResult<()> {
         let context = InputMappingContext {
             plan: displayed.plan,
@@ -267,7 +310,7 @@ impl LiveSession {
         Ok(())
     }
 
-    fn pan_viewport(&mut self, chord: &KeyChord, displayed: DisplayedFrame) -> CliResult<bool> {
+    fn pan_viewport(&mut self, chord: &KeyChord, displayed: &DisplayedFrame) -> CliResult<bool> {
         if self.zoom.zoom_percent() == 100 || !chord.ctrl || chord.alt || chord.shift {
             return Ok(false);
         }
@@ -294,6 +337,21 @@ impl LiveSession {
             self.stdout.flush()?;
         }
         Ok(())
+    }
+}
+
+fn frame_repaint_required(
+    last_frame: Option<&DisplayedFrame>,
+    sha256: &str,
+    crop: winlane_view::SourceRect,
+    viewport_repaint_required: bool,
+) -> bool {
+    if viewport_repaint_required {
+        return true;
+    }
+    match last_frame {
+        Some(displayed) => displayed.sha256 != sha256 || displayed.crop != crop,
+        None => true,
     }
 }
 
@@ -559,6 +617,42 @@ mod tests {
             "\x1b[24;1H\x1b[7m HALF-BLOCK PREVIEW \x1b[0m\x1b[K"
         );
         assert!(fallback_label_sequence(1, 80).is_none());
+    }
+
+    #[test]
+    fn identical_frame_skips_repaint_but_crop_resize_or_new_hash_repaints() {
+        let geometry = TerminalGeometry::cells(4, 2).unwrap();
+        let plan =
+            winlane_view::plan_render(4, 4, geometry, winlane_view::OutputSurface::HalfBlockCells)
+                .unwrap();
+        let crop = winlane_view::SourceRect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let displayed = DisplayedFrame {
+            plan,
+            frame_width: 4,
+            frame_height: 4,
+            crop,
+            sha256: "same".to_string(),
+        };
+        assert!(!frame_repaint_required(
+            Some(&displayed),
+            "same",
+            crop,
+            false
+        ));
+        assert!(frame_repaint_required(Some(&displayed), "new", crop, false));
+        assert!(frame_repaint_required(
+            Some(&displayed),
+            "same",
+            winlane_view::SourceRect { x: 1, ..crop },
+            false
+        ));
+        assert!(frame_repaint_required(Some(&displayed), "same", crop, true));
+        assert!(frame_repaint_required(None, "same", crop, false));
     }
 
     #[test]

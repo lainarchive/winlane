@@ -16,7 +16,7 @@ pub use args::{
 };
 pub use evidence::run_evidence_command;
 pub use guest::run_guest_command;
-pub use live::{LiveViewConfig, capture_frame, run_live_view};
+pub use live::{LiveViewConfig, capture_transient_frame, run_live_view};
 pub use machine::{run_daemon, run_machine_command, run_mcp};
 
 pub type CliResult<T> = Result<T, CliError>;
