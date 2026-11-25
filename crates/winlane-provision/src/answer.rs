@@ -165,6 +165,11 @@ pub fn unattend_xml(
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add">
           <Order>1</Order>
+          <Description>Suppress automatic device encryption</Description>
+          <Path>reg.exe add HKLM\SYSTEM\CurrentControlSet\Control\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
           <Description>Allow OOBE without a network or Microsoft account</Description>
           <Path>reg.exe add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
         </RunSynchronousCommand>
@@ -306,6 +311,27 @@ mod tests {
         assert!(xml.contains("<Type>MSR</Type>"));
         assert!(xml.contains("<PartitionID>3</PartitionID>"));
         assert!(xml.contains("<Value>Windows 11 Enterprise Evaluation</Value>"));
+    }
+
+    #[test]
+    fn specialize_disables_device_encryption_before_oobe_bypass() {
+        let xml = unattend_xml(
+            "wl-test",
+            "winlane",
+            "password",
+            &NetworkMode::Isolated,
+            None,
+            "key",
+        );
+        let encryption = xml
+            .find("reg.exe add HKLM\\SYSTEM\\CurrentControlSet\\Control\\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f")
+            .expect("device encryption suppression command missing");
+        let oobe = xml
+            .find("reg.exe add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f")
+            .expect("OOBE bypass command missing");
+        assert!(encryption < oobe);
+        assert!(xml.contains("<Order>1</Order>\n          <Description>Suppress automatic device encryption</Description>"));
+        assert!(xml.contains("<Order>2</Order>\n          <Description>Allow OOBE without a network or Microsoft account</Description>"));
     }
 
     #[test]
