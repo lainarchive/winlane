@@ -142,6 +142,46 @@ impl Frame {
         }
         Self::new(width, height, pixels)
     }
+
+    pub fn scaled_lanczos3(&self, width: u32, height: u32) -> ViewResult<Self> {
+        if width == self.width && height == self.height {
+            return Ok(self.clone());
+        }
+        if width == 0 || height == 0 {
+            return Err(ViewError::EmptyFrame);
+        }
+        let len = width as usize * height as usize;
+        if len > MAX_FRAME_PIXELS {
+            return Err(ViewError::FrameTooLarge {
+                pixels: len,
+                maximum: MAX_FRAME_PIXELS,
+            });
+        }
+
+        let source_bytes = self.rgb_bytes();
+        let source = fast_image_resize::images::ImageRef::new(
+            self.width,
+            self.height,
+            &source_bytes,
+            fast_image_resize::PixelType::U8x3,
+        )?;
+        let mut destination = fast_image_resize::images::Image::new(
+            width,
+            height,
+            fast_image_resize::PixelType::U8x3,
+        );
+        let options = fast_image_resize::ResizeOptions::new().resize_alg(
+            fast_image_resize::ResizeAlg::Convolution(fast_image_resize::FilterType::Lanczos3),
+        );
+        fast_image_resize::Resizer::new().resize(&source, &mut destination, &options)?;
+
+        let bytes = destination.into_vec();
+        let mut pixels = Vec::with_capacity(len);
+        for channel in bytes.as_chunks::<3>().0 {
+            pixels.push(Rgb8::new(channel[0], channel[1], channel[2]));
+        }
+        Self::new(width, height, pixels)
+    }
 }
 
 #[cfg(test)]

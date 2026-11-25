@@ -44,6 +44,8 @@ impl ZoomViewport {
         }
         let width = crop_dimension(frame_width, self.zoom_percent);
         let height = crop_dimension(frame_height, self.zoom_percent);
+        self.center_x = clamp_center(self.center_x, width, frame_width);
+        self.center_y = clamp_center(self.center_y, height, frame_height);
         Ok(SourceRect {
             x: clamped_left(self.center_x, width, frame_width),
             y: clamped_left(self.center_y, height, frame_height),
@@ -59,9 +61,9 @@ impl ZoomViewport {
         frame_width: u32,
         frame_height: u32,
     ) -> ViewResult<()> {
-        let _ = self.rect_for(frame_width, frame_height)?;
-        self.center_x = pan_coordinate(self.center_x, dx, frame_width);
-        self.center_y = pan_coordinate(self.center_y, dy, frame_height);
+        let crop = self.rect_for(frame_width, frame_height)?;
+        self.center_x = pan_coordinate(self.center_x, dx, crop.width, frame_width);
+        self.center_y = pan_coordinate(self.center_y, dy, crop.height, frame_height);
         Ok(())
     }
 }
@@ -84,9 +86,23 @@ fn clamped_left(center: u32, crop: u32, source: u32) -> u32 {
         .min(source.saturating_sub(crop))
 }
 
-fn pan_coordinate(center: u32, delta: i32, limit: u32) -> u32 {
-    let max = i64::from(limit.saturating_sub(1));
-    (i64::from(center) + i64::from(delta)).clamp(0, max) as u32
+fn clamp_center(center: u32, crop: u32, source: u32) -> u32 {
+    let (min, max) = center_range(crop, source);
+    center.clamp(min, max)
+}
+
+fn pan_coordinate(center: u32, delta: i32, crop: u32, source: u32) -> u32 {
+    let (min, max) = center_range(crop, source);
+    (i64::from(center) + i64::from(delta)).clamp(i64::from(min), i64::from(max)) as u32
+}
+
+fn center_range(crop: u32, source: u32) -> (u32, u32) {
+    if crop >= source {
+        let center = source / 2;
+        return (center, center);
+    }
+    let leading = crop / 2;
+    (leading, source - crop + leading)
 }
 
 #[cfg(test)]
@@ -132,6 +148,16 @@ mod tests {
         let rect = viewport.rect_for(1024, 768).unwrap();
         assert_eq!(rect.x + rect.width, 1024);
         assert_eq!(rect.y + rect.height, 768);
+    }
+
+    #[test]
+    fn reverse_pan_moves_immediately_after_edge_clamp() {
+        let mut viewport = ZoomViewport::new(200).unwrap();
+        let _ = viewport.rect_for(1024, 768).unwrap();
+        viewport.pan_by(10_000, 0, 1024, 768).unwrap();
+        assert_eq!(viewport.rect_for(1024, 768).unwrap().x, 512);
+        viewport.pan_by(-128, 0, 1024, 768).unwrap();
+        assert_eq!(viewport.rect_for(1024, 768).unwrap().x, 384);
     }
 
     #[test]

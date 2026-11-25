@@ -38,6 +38,10 @@ pub enum ViewError {
     FrameArtifactHashMismatch,
     #[error("PNG encoding failed: {0}")]
     ImageEncode(#[from] png::EncodingError),
+    #[error("image resize buffer invalid: {0}")]
+    ImageResizeBuffer(#[from] fast_image_resize::ImageBufferError),
+    #[error("image resize failed: {0}")]
+    ImageResize(#[from] fast_image_resize::ResizeError),
     #[error("terminal output failed")]
     Output(#[from] io::Error),
 }

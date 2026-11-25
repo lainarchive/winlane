@@ -209,9 +209,22 @@ fn iterm_supports_kitty(version: Option<&str>) -> bool {
         return false;
     };
     let mut parts = version.split('.');
-    let major = parts.next().and_then(|part| part.parse::<u32>().ok());
-    let minor = parts.next().and_then(|part| part.parse::<u32>().ok());
-    matches!((major, minor), (Some(major), Some(minor)) if major > 3 || (major == 3 && minor >= 5))
+    let Some(major) = parts.next().and_then(parse_numeric_prefix) else {
+        return false;
+    };
+    let Some(minor) = parts.next().and_then(parse_numeric_prefix) else {
+        return false;
+    };
+    let patch = parts.next().and_then(parse_numeric_prefix).unwrap_or(0);
+    major > 3 || (major == 3 && (minor > 5 || (minor == 5 && patch >= 4)))
+}
+
+fn parse_numeric_prefix(part: &str) -> Option<u32> {
+    let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn capabilities(
@@ -277,10 +290,10 @@ mod tests {
     }
 
     #[test]
-    fn iterm_35_uses_kitty_graphics() {
+    fn iterm_354_uses_kitty_graphics() {
         let detected = detect_capabilities(&env(&[
             ("TERM_PROGRAM", "iTerm.app"),
-            ("TERM_PROGRAM_VERSION", "3.5.0"),
+            ("TERM_PROGRAM_VERSION", "3.5.4beta2"),
         ]));
         assert_eq!(detected.protocol, GraphicsProtocol::Kitty);
         assert_eq!(detected.source, DetectionSource::ITerm2);
@@ -289,7 +302,7 @@ mod tests {
 
     #[test]
     fn old_or_unknown_iterm_conservatively_uses_unsupported_iterm_detection() {
-        for version in [Some("3.4.23"), None] {
+        for version in [Some("3.4.23"), Some("3.5.0"), Some("3.5.3"), None] {
             let mut environment = env(&[("TERM_PROGRAM", "iTerm.app")]);
             environment.term_program_version = version.map(str::to_owned);
             let detected = detect_capabilities(&environment);
@@ -345,7 +358,7 @@ mod tests {
                 "iterm2 kitty graphics",
                 vec![
                     ("TERM_PROGRAM", "iTerm.app"),
-                    ("TERM_PROGRAM_VERSION", "3.5.0"),
+                    ("TERM_PROGRAM_VERSION", "3.5.4"),
                 ],
                 GraphicsProtocol::Kitty,
                 DetectionSource::ITerm2,
