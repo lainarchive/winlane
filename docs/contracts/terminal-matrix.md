@@ -21,6 +21,19 @@ The experiment was also not a compelling throughput win even before the Ghostty 
 
 The viewer therefore keeps whole-frame Kitty rendering. The only incremental optimization retained is a conservative cropped-viewport skip: when zoomed in, if the exact cropped source pixels are unchanged, the scaled output is necessarily unchanged and no repaint is emitted. This is used only after the captured artifact's SHA-256 validation succeeds; metadata is never trusted without validating artifact bytes.
 
+## Cropped repaint suppression proof
+
+`scripts/validate-cropped-repaint.py` is the reproducible harness for this optimization. It starts a real kitty window under Xvfb, serves deterministic 640x400 frame artifacts through a fake Unix control plane, runs `winlane view` at 30 fps and zoom 200, measures terminal writes with `strace`, clicks through the real terminal input path, and checks X11 pixels rather than escape sequences. The harness downloads the pinned kitty 0.51.1 archive when `--kitty-bin` is not supplied. Required host tools are python3, Xvfb, ffmpeg, xdotool, xwininfo, xdpyinfo, and strace.
+
+```sh
+cargo build -p winlane-cli
+python3 scripts/validate-cropped-repaint.py --output-dir /tmp/winlane-cropped-repaint
+```
+
+The validation run recorded in this branch used kitty 0.51.1 and the debug `winlane` binary on Ubuntu 22.04. A center click at terminal pixel `(605,408)` reached source pixel `(321,202)` exactly, including the zoom-200 crop offset. During 120 captures whose bytes changed only outside the visible crop, the viewer emitted zero repaint writes and zero repaint bytes; a same-sized inside-crop repaint measured 19,770 bytes, so the suppressed phase avoided an estimated 2,372,400 terminal bytes. Viewer RSS stayed at 14,032 KiB across those captures. When pixels inside the crop changed, the next repaint replaced all red pixels with the new yellow frame and left zero stale red pixels. Window resize and font zoom each forced a new repaint despite unchanged source pixels (14,430 and 14,578 bytes in that run), and the split-pane probe clipped output to the left pane with zero red pixels in the right-side probe area.
+
+This is control-plane/rendering validation with synthetic local frame artifacts, not a real Windows guest proof. No Windows/QEMU validation is claimed for this optimization.
+
 ## Conservative fallback or unvalidated paths
 
 | Path | Status |
