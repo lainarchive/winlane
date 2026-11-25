@@ -6,7 +6,7 @@ winlane is local-first. It provisions Windows into a golden qcow2 image, boots c
 
 ![Time-compressed winlane demo: a real Windows machine in the left terminal pane, controlled through the CLI and MCP driver in the right pane](docs/assets/winlane-demo-highlight.gif)
 
-The first supported path is narrow on purpose: Linux x86_64, KVM, QEMU, Windows 11 x64, UEFI, swtpm, virtio drivers, isolated or QEMU user-mode NAT networking, and Kitty-protocol high-resolution terminal rendering with a clearly labeled half-block preview fallback.
+The only currently supported host path is narrow on purpose: Linux x86_64, KVM, QEMU, Windows 11 x64, UEFI, swtpm, virtio drivers, isolated or QEMU user-mode NAT networking, and Kitty-protocol high-resolution terminal rendering with a clearly labeled half-block preview fallback. A native Windows Hyper-V backend is an architecture lane, not supported functionality yet.
 
 ## Why
 
@@ -83,7 +83,7 @@ Guest media:
 - a licensed or evaluation Windows 11 x64 ISO
 - the Fedora virtio-win driver ISO
 
-winlane does not download or redistribute Windows. Evaluation media has its own Microsoft license terms.
+winlane does not download or redistribute Windows. The Windows 11 Enterprise Evaluation ISO is a time-limited evaluation under Microsoft license terms, not a perpetual production license. Managed cloud Windows development machines are not a reusable Windows license or winlane backend.
 
 Before provisioning or starting a daemon, run the read-only host preflight:
 
