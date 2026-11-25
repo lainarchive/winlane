@@ -824,10 +824,14 @@ impl QemuBackend {
 
     async fn type_text(&mut self, machine: &MachineHandle, text: &str) -> CoreResult<()> {
         let qmp = self.qmp_for_machine(machine).await?;
-        for character in text.chars() {
-            let keys = ascii_qcode_keys(character).ok_or(CoreError::Unsupported(
+        let characters = text
+            .chars()
+            .map(ascii_qcode_keys)
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CoreError::Unsupported(
                 "virtual keyboard input supports printable ASCII plus newline and tab",
             ))?;
+        for keys in characters {
             send_qmp_keys(&qmp, &keys).await?;
         }
         Ok(())
@@ -1858,5 +1862,12 @@ mod tests {
         assert_eq!(ascii_qcode_keys('A'), Some(vec!["shift", "a"]));
         assert_eq!(ascii_qcode_keys('!'), Some(vec!["shift", "1"]));
         assert_eq!(ascii_qcode_keys('é'), None);
+        assert_eq!(
+            "aé"
+                .chars()
+                .map(ascii_qcode_keys)
+                .collect::<Option<Vec<_>>>(),
+            None
+        );
     }
 }
