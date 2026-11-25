@@ -60,7 +60,7 @@ The cast is recorded with asciinema `--idle-time-limit 2`; long idle waits are c
 - Because the view runs inside tmux, the conservative half-block renderer is used even when the outer terminal supports kitty graphics.
 - The golden image must already provision Windows, virtio drivers, QEMU Guest Agent, and the interactive user session used by winlane.
 - Notepad and the post-restore text reader run through temporary Scheduled Tasks using the `INTERACTIVE` principal. If no interactive session exists, the demo correctly fails.
-- UI Automation paths are read fresh immediately before each write and before the post-restore text read; the reader also compares `runtimeId` when one is available.
+- UI Automation paths are read fresh immediately before each write and before the post-restore text read. Runtime-id checks are used for semantic writes; the independent post-restore reader verifies the freshly resolved text node content exactly.
 - Running checkpoints can be large and slow; checkpoint timeout is 300 seconds in each direction.
 - The harness does not install tmux, asciinema, agg, ffmpeg, QEMU, Windows, or driver dependencies.
 - Temporary driver files are removed. The daemon, tmux session, machine, and recording processes are cleaned up on normal failure or interruption; a hard host crash can still leave machine state under the runtime root.

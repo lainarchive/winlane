@@ -171,6 +171,11 @@ tmux select-pane -t "$control_pane"
 cast_file="$output_dir/winlane-demo.cast"
 record_command='if [ -z "${TERM:-}" ] || [ "${TERM:-}" = dumb ]; then export TERM=xterm; fi; stty cols 132 rows 40 2>/dev/null || true; exec tmux attach-session -t '
 record_command+="$session_name"
+if [[ -z ${TERM:-} || ${TERM:-} == dumb ]]; then
+  export TERM=xterm
+fi
+export COLUMNS=132
+export LINES=40
 if ! asciinema rec --overwrite --idle-time-limit 2 --command "$record_command" "$cast_file"; then
   fail "asciinema recording failed"
 fi
@@ -194,7 +199,7 @@ if command -v agg >/dev/null 2>&1; then
     rm -f -- "$gif_file"
   elif command -v ffmpeg >/dev/null 2>&1; then
     mp4_file="$output_dir/winlane-demo.mp4"
-    if ! ffmpeg -y -loglevel error -i "$gif_file" -movflags faststart -pix_fmt yuv420p "$mp4_file"; then
+    if ! ffmpeg -y -loglevel error -i "$gif_file" -vf 'pad=ceil(iw/2)*2:ceil(ih/2)*2' -movflags faststart -pix_fmt yuv420p "$mp4_file"; then
       echo "warning: ffmpeg mp4 conversion failed; keeping gif and cast" >&2
       rm -f -- "$mp4_file"
     fi

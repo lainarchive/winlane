@@ -10,7 +10,7 @@ TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
   <RegistrationInfo><Description>winlane demo interactive task</Description></RegistrationInfo>
   <Triggers><TimeTrigger><Enabled>false</Enabled><StartBoundary>2024-01-01T00:00:00</StartBoundary></TimeTrigger></Triggers>
   <Principals>
-    <Principal id="Author"><UserId>INTERACTIVE</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
+    <Principal id="Author"><GroupId>S-1-5-4</GroupId><RunLevel>HighestAvailable</RunLevel></Principal>
   </Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>

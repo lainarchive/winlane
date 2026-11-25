@@ -123,7 +123,15 @@ write_notepad_text() {
   local tree_output=$2
   local tree_args node_line node runtime_id set_args
   tree_args=$(printf '{"machine":"%s","max_depth":8,"max_nodes":2000}' "$machine_name")
-  mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_output"
+  for attempt in 1 2; do
+    if mcp_call --timeout-seconds 60 --arguments "$tree_args" ui_tree >"$tree_output"; then
+      break
+    fi
+    if [[ $attempt -eq 2 ]]; then
+      return 1
+    fi
+    sleep 3
+  done
   printf '\n$ python3 %q %q\n' "$demo_dir/find_notepad_node.py" "$tree_output" >&2
   node_line=$(python3 "$demo_dir/find_notepad_node.py" "$tree_output")
   IFS=$'\t' read -r node runtime_id <<<"$node_line"
@@ -136,23 +144,50 @@ write_notepad_text() {
     return 1
   fi
   if [[ -n $runtime_id ]]; then
-    set_args=$(printf '{"machine":"%s","node":"%s","text":"%s","runtime_id":"%s"}' \
+    set_args=$(printf '{"machine":"%s","node":"%s","text":"%s","runtime_id":"%s","timeout_ms":60000}' \
       "$machine_name" "$node" "$text" "$runtime_id")
   else
-    set_args=$(printf '{"machine":"%s","node":"%s","text":"%s"}' \
+    set_args=$(printf '{"machine":"%s","node":"%s","text":"%s","timeout_ms":60000}' \
       "$machine_name" "$node" "$text")
   fi
-  mcp_call --timeout-seconds 60 --arguments "$set_args" ui_set_text
+  for attempt in 1 2; do
+    if mcp_call --timeout-seconds 60 --arguments "$set_args" ui_set_text; then
+      return 0
+    fi
+    if [[ $attempt -eq 2 ]]; then
+      return 1
+    fi
+    sleep 3
+  done
 }
 
 printf 'winlane real-machine demo\n'
 printf 'machine: %s\n' "$machine_name"
 printf 'control socket: %s\n' "$control_socket"
 
+disk_gb=$(python3 - "$golden_image" <<'PYEOF'
+import json
+import subprocess
+import sys
+
+info = json.loads(subprocess.check_output(
+    ["qemu-img", "info", "--output=json", sys.argv[1]], text=True
+))
+size = int(info["virtual-size"])
+gib = 1024**3
+print((size + gib - 1) // gib)
+PYEOF
+)
+if [[ ! $disk_gb =~ ^[1-9][0-9]*$ ]]; then
+  echo "drive-demo error: unable to derive disk size from $golden_image" >&2
+  exit 1
+fi
+
 run "$winlane_bin" machine create \
   --control-socket "$control_socket" \
   --name "$machine_name" \
-  --base-image "$golden_image"
+  --base-image "$golden_image" \
+  --disk-gb "$disk_gb"
 run "$winlane_bin" machine start \
   --control-socket "$control_socket" \
   --machine "$machine_name"
@@ -222,9 +257,6 @@ if ! valid_runtime_id "$restored_runtime_id"; then
 fi
 
 read_powershell_args="-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\winlane-demo-read-uia.ps1 -Path $restored_node -OutputPath C:\\Windows\\Temp\\winlane-demo-read.json"
-if [[ -n $restored_runtime_id ]]; then
-  read_powershell_args="$read_powershell_args -RuntimeId '$restored_runtime_id'"
-fi
 run python3 "$demo_dir/write_task_xml.py" "$work_dir/read-task.xml" \
   --command 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' \
   --arguments "$read_powershell_args"
