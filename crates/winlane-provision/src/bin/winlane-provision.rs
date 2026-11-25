@@ -4,7 +4,7 @@ use std::time::Duration;
 use winlane_contracts::{BootMode, CpuArch, MachineSpec, NetworkMode};
 use winlane_provision::{ProvisionOptions, provision, write_human_log};
 
-const PROVISION_USAGE: &str = "usage: winlane-provision provision --name NAME --iso WINDOWS_ISO --virtio-iso VIRTIO_ISO --artifact-root DIR [--memory-mb 8192] [--cpus 4] [--disk-gb 80] [--network isolated|nat] [--timeout-minutes 90] [--image-name NAME] [--product-key KEY] [--prepare-only] [--json]";
+const PROVISION_USAGE: &str = "usage: winlane-provision provision --name NAME --iso WINDOWS_ISO --virtio-iso VIRTIO_ISO --artifact-root DIR [--memory-mb 8192] [--cpus 4] [--disk-gb 80] [--network isolated|nat] [--timeout-minutes 90] [--image-name NAME] [--product-key KEY] [--windows-iso-sha256 SHA256] [--virtio-iso-sha256 SHA256] [--prepare-only] [--json]";
 
 fn main() -> ExitCode {
     match run() {
@@ -54,6 +54,8 @@ fn run() -> Result<ExitCode, String> {
     let mut json = false;
     let mut image_name = Some("Windows 11 Enterprise Evaluation".to_string());
     let mut product_key = "NPPR9-FWDCX-D2C8J-H872K-2YT43".to_string();
+    let mut windows_iso_sha256 = None;
+    let mut virtio_iso_sha256 = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -88,6 +90,18 @@ fn run() -> Result<ExitCode, String> {
                 product_key = args
                     .next()
                     .ok_or_else(|| "--product-key needs a value".to_string())?;
+            }
+            "--windows-iso-sha256" => {
+                windows_iso_sha256 = Some(
+                    args.next()
+                        .ok_or_else(|| "--windows-iso-sha256 needs a value".to_string())?,
+                )
+            }
+            "--virtio-iso-sha256" => {
+                virtio_iso_sha256 = Some(
+                    args.next()
+                        .ok_or_else(|| "--virtio-iso-sha256 needs a value".to_string())?,
+                )
             }
             "--prepare-only" => prepare_only = true,
             "--json" => json = true,
@@ -126,6 +140,8 @@ fn run() -> Result<ExitCode, String> {
     options.prepare_only = prepare_only;
     options.image_name = image_name;
     options.product_key = product_key;
+    options.windows_iso_sha256 = windows_iso_sha256;
+    options.virtio_iso_sha256 = virtio_iso_sha256;
 
     let report = provision(&options).map_err(|error| error.to_string())?;
     if json {

@@ -1,6 +1,7 @@
 use crate::answer::{firstboot_cmd, unattend_xml};
 use crate::qemu::{GuestExecStatus, QemuProtocolError, QemuProtocolResult, QgaClient, QmpClient};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -47,6 +48,8 @@ pub struct ProvisionOptions {
     pub ovmf_vars_path: Option<PathBuf>,
     pub image_name: Option<String>,
     pub product_key: String,
+    pub windows_iso_sha256: Option<String>,
+    pub virtio_iso_sha256: Option<String>,
 }
 
 impl ProvisionOptions {
@@ -64,6 +67,8 @@ impl ProvisionOptions {
             ovmf_vars_path: None,
             image_name: Some("Windows 11 Enterprise Evaluation".to_string()),
             product_key: "NPPR9-FWDCX-D2C8J-H872K-2YT43".to_string(),
+            windows_iso_sha256: None,
+            virtio_iso_sha256: None,
         }
     }
 }
@@ -127,7 +132,9 @@ pub struct ProvisionReport {
     pub state_dir: PathBuf,
     pub disk_path: PathBuf,
     pub windows_iso_path: PathBuf,
+    pub windows_iso_sha256: Option<String>,
     pub virtio_iso_path: PathBuf,
+    pub virtio_iso_sha256: Option<String>,
     pub unattended_iso_path: PathBuf,
     pub qemu_log_path: PathBuf,
     pub swtpm_log_path: PathBuf,
@@ -192,7 +199,9 @@ pub fn provision(options: &ProvisionOptions) -> ProvisionResult<ProvisionReport>
             .as_ref()
             .map(PathBuf::from)
             .unwrap_or_default(),
+        windows_iso_sha256: None,
         virtio_iso_path: options.virtio_iso_path.clone(),
+        virtio_iso_sha256: None,
         unattended_iso_path: paths.unattended_iso.clone(),
         qemu_log_path: paths.qemu_log.clone(),
         swtpm_log_path: paths.swtpm_log.clone(),
@@ -228,6 +237,16 @@ pub fn provision(options: &ProvisionOptions) -> ProvisionResult<ProvisionReport>
             ProvisionStage::Failed,
             format!("{}: {}", probe.name, probe.detail),
         );
+    }
+    match media_sha256s(options).and_then(|(windows_sha256, virtio_sha256)| {
+        report.windows_iso_sha256 = Some(windows_sha256.clone());
+        report.virtio_iso_sha256 = Some(virtio_sha256.clone());
+        verify_media_expectations(options, &windows_sha256, &virtio_sha256)
+    }) {
+        Ok(()) => {}
+        Err(error) => {
+            return finish_failed(report, started, ProvisionStage::Failed, error.to_string());
+        }
     }
 
     let media_started = Instant::now();
@@ -337,6 +356,83 @@ fn validate_request(options: &ProvisionOptions) -> ProvisionResult<()> {
         return Err(ProvisionError::InvalidRequest(
             "install_timeout must be at least 60 seconds".to_string(),
         ));
+    }
+    for (name, expected) in [
+        ("windows_iso_sha256", &options.windows_iso_sha256),
+        ("virtio_iso_sha256", &options.virtio_iso_sha256),
+    ] {
+        if let Some(expected) = expected
+            && !valid_sha256_hex(expected)
+        {
+            return Err(ProvisionError::InvalidRequest(format!(
+                "{name} must be 64 hexadecimal characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sha256_file(path: &Path) -> ProvisionResult<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    Ok(output)
+}
+
+fn media_sha256s(options: &ProvisionOptions) -> ProvisionResult<(String, String)> {
+    let windows_path = options
+        .spec
+        .iso_path
+        .as_ref()
+        .map(PathBuf::from)
+        .ok_or_else(|| ProvisionError::InvalidRequest("missing Windows ISO path".to_string()))?;
+    Ok((
+        sha256_file(&windows_path)?,
+        sha256_file(&options.virtio_iso_path)?,
+    ))
+}
+
+fn verify_media_expectations(
+    options: &ProvisionOptions,
+    windows_sha256: &str,
+    virtio_sha256: &str,
+) -> ProvisionResult<()> {
+    for (name, actual, expected) in [
+        (
+            "Windows ISO",
+            windows_sha256,
+            options.windows_iso_sha256.as_deref(),
+        ),
+        (
+            "virtio ISO",
+            virtio_sha256,
+            options.virtio_iso_sha256.as_deref(),
+        ),
+    ] {
+        if let Some(expected) = expected
+            && !actual.eq_ignore_ascii_case(expected)
+        {
+            return Err(ProvisionError::InvalidRequest(format!(
+                "{name} SHA-256 mismatch: expected {}, got {actual}",
+                expected.to_ascii_lowercase()
+            )));
+        }
     }
     Ok(())
 }
@@ -1240,6 +1336,44 @@ mod tests {
         let name = computer_name("averyveryverylong_machine_name");
         assert!(name.len() <= 15);
         assert!(!name.contains('_'));
+    }
+
+    #[test]
+    fn media_integrity_records_sha256_and_accepts_matching_uppercase_hash() {
+        let root = tempfile::tempdir().expect("temporary media root");
+        let windows = root.path().join("windows.iso");
+        let virtio = root.path().join("virtio.iso");
+        fs::write(&windows, b"windows").expect("write windows iso");
+        fs::write(&virtio, b"virtio").expect("write virtio iso");
+        let mut machine_spec = spec();
+        machine_spec.iso_path = Some(windows.to_string_lossy().into_owned());
+        let mut options =
+            ProvisionOptions::new(machine_spec, virtio.clone(), root.path().join("artifacts"));
+        let expected_windows = sha256_file(&windows).expect("hash windows");
+        options.windows_iso_sha256 = Some(expected_windows.to_uppercase());
+        let (windows_sha256, virtio_sha256) = media_sha256s(&options).expect("media hashes");
+        verify_media_expectations(&options, &windows_sha256, &virtio_sha256)
+            .expect("media integrity");
+        assert_eq!(windows_sha256, expected_windows);
+        assert_eq!(virtio_sha256.len(), 64);
+    }
+
+    #[test]
+    fn media_integrity_fails_closed_on_mismatch() {
+        let root = tempfile::tempdir().expect("temporary media root");
+        let windows = root.path().join("windows.iso");
+        let virtio = root.path().join("virtio.iso");
+        fs::write(&windows, b"windows").expect("write windows iso");
+        fs::write(&virtio, b"virtio").expect("write virtio iso");
+        let mut machine_spec = spec();
+        machine_spec.iso_path = Some(windows.to_string_lossy().into_owned());
+        let mut options =
+            ProvisionOptions::new(machine_spec, virtio, root.path().join("artifacts"));
+        options.windows_iso_sha256 = Some("0".repeat(64));
+        let (windows_sha256, virtio_sha256) = media_sha256s(&options).expect("media hashes");
+        let error = verify_media_expectations(&options, &windows_sha256, &virtio_sha256)
+            .expect_err("mismatch must fail");
+        assert!(error.to_string().contains("Windows ISO SHA-256 mismatch"));
     }
 
     #[test]

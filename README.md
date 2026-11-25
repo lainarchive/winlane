@@ -116,6 +116,8 @@ cargo run --release -p winlane-provision -- provision \
   --json
 ```
 
+The provisioning report records `windows_iso_sha256` and `virtio_iso_sha256`. To fail closed against hashes obtained independently from the media publisher, pass `--windows-iso-sha256 SHA256` or `--virtio-iso-sha256 SHA256`; a mismatch stops provisioning before answer media or disk creation. winlane does not download media or supply trusted hashes.
+
 The output golden image is written under the artifact root as `win11-alpha/golden.qcow2`. Provisioning writes a machine-readable report next to it. The generated first-boot script disables hibernation and sets AC/DC standby and monitor power-off timeouts to zero so unattended coding machines do not suspend or blank their console during long-running operations. Normal provisioning removes the answer media after the install attempt because it contains the generated local administrator credential; `--prepare-only` intentionally retains that owner-only ISO for a later manual install. ISOs, disks, screenshots, reports, and machine state are deliberately ignored by git.
 
 ## Start the control daemon
