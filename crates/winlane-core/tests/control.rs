@@ -726,6 +726,68 @@ async fn qmp_correlates_commands_and_receives_async_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarted_backend_marks_dead_orphan_failed_and_stop_cleans_stale_sockets() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    let machine = backend
+        .create_machine(&spec("orphaned"))
+        .await
+        .expect("create machine");
+    backend
+        .start_machine(&machine)
+        .await
+        .expect("start machine");
+    let state_dir = root.path().join("orphaned");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join("machine.json")).expect("read machine record"),
+    )
+    .expect("decode machine record");
+    let pid = record["pid"].as_u64().expect("qemu pid").to_string();
+    std::mem::forget(backend);
+    let kill_status = std::process::Command::new("kill")
+        .arg("-9")
+        .arg(&pid)
+        .status()
+        .expect("run kill");
+    assert!(kill_status.success());
+    let mut qmp_closed = false;
+    for _ in 0..40 {
+        if QmpClient::connect(state_dir.join("qmp.sock"))
+            .await
+            .is_err()
+        {
+            qmp_closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(qmp_closed);
+    assert!(state_dir.join("qmp.sock").exists());
+
+    let mut restarted = QemuBackend::new(root.path())
+        .await
+        .expect("restarted backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+    assert_eq!(
+        restarted.status_machine(&machine).await.expect("status"),
+        MachineState::Failed
+    );
+    restarted
+        .stop_machine(&machine)
+        .await
+        .expect("stop orphaned machine");
+    assert_eq!(
+        restarted.status_machine(&machine).await.expect("status"),
+        MachineState::Stopped
+    );
+    assert!(!state_dir.join("qmp.sock").exists());
+    assert!(!state_dir.join("qga.sock").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn comma_escaped_qmp_path_does_not_defeat_pid_liveness() {
     let temp = tempfile::tempdir().expect("temporary root parent");
     let root = temp.path().join("comma,root");

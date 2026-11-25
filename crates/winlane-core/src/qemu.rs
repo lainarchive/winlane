@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -432,6 +432,9 @@ impl QemuBackend {
             }
         }
 
+        let state_dir = PathBuf::from(&record.handle.state_dir);
+        remove_stale_socket(&state_dir.join(QMP_SOCKET_FILE)).await?;
+        remove_stale_socket(&state_dir.join(QGA_SOCKET_FILE)).await?;
         record.pid = None;
         record.handle.state = MachineState::Stopped;
         self.write_record(&record).await?;
@@ -499,24 +502,10 @@ impl QemuBackend {
         {
             match QmpClient::connect(&record.qmp_socket_path).await {
                 Ok(qmp) => query_machine_state(&qmp).await?,
-                Err(_) => {
-                    if let Some(pid) = machine_process_id(&record).await
-                        && qemu_process_alive(pid, &record.qmp_socket_path).await
-                    {
-                        MachineState::Running
-                    } else {
-                        record.handle.state.clone()
-                    }
-                }
+                Err(_) => external_machine_state(&record).await,
             }
         } else {
-            if let Some(pid) = machine_process_id(&record).await
-                && qemu_process_alive(pid, &record.qmp_socket_path).await
-            {
-                MachineState::Running
-            } else {
-                record.handle.state.clone()
-            }
+            external_machine_state(&record).await
         };
 
         if persist {
@@ -1716,6 +1705,21 @@ async fn qemu_process_alive(pid: u32, qmp_socket_path: &Path) -> bool {
         .any(|arg| arg == expected_arg.as_bytes())
 }
 
+async fn external_machine_state(record: &MachineRecord) -> MachineState {
+    if let Some(pid) = machine_process_id(record).await
+        && qemu_process_alive(pid, &record.qmp_socket_path).await
+    {
+        MachineState::Running
+    } else if matches!(
+        record.handle.state,
+        MachineState::Running | MachineState::Paused
+    ) {
+        MachineState::Failed
+    } else {
+        record.handle.state.clone()
+    }
+}
+
 async fn machine_process_id(record: &MachineRecord) -> Option<u32> {
     let pid_path = PathBuf::from(&record.handle.state_dir).join("qemu.pid");
     if let Some(pid) = tokio::fs::read_to_string(pid_path)
@@ -1726,6 +1730,20 @@ async fn machine_process_id(record: &MachineRecord) -> Option<u32> {
         return Some(pid);
     }
     record.pid
+}
+
+async fn remove_stale_socket(path: &Path) -> CoreResult<()> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CoreError::io("inspect stale socket", path)(error)),
+    };
+    if metadata.file_type().is_socket() {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(CoreError::io("remove stale socket", path))?;
+    }
+    Ok(())
 }
 
 async fn external_qmp_is_gone(path: &Path) -> CoreResult<bool> {
