@@ -1,6 +1,6 @@
 use winlane_view::{
     DetectionSource, Frame, GraphicsProtocol, Rgb8, TerminalCapabilities, TerminalEnvironment,
-    TerminalGeometry, detect_capabilities, render_frame, render_frame_with_fallback,
+    TerminalGeometry, detect_capabilities, render_frame,
 };
 
 fn environment_fixture(name: &str) -> TerminalEnvironment {
@@ -22,6 +22,9 @@ fn environment_fixture(name: &str) -> TerminalEnvironment {
         match key {
             "TERM" => environment.term = Some(value.to_owned()),
             "TERM_PROGRAM" => environment.term_program = Some(value.to_owned()),
+            "TERM_PROGRAM_VERSION" => {
+                environment.term_program_version = Some(value.to_owned());
+            }
             "COLORTERM" => environment.colorterm = Some(value.to_owned()),
             "KITTY_WINDOW_ID" => environment.kitty_window_id = Some(value.to_owned()),
             "TMUX" => environment.tmux = Some(value.to_owned()),
@@ -63,16 +66,14 @@ fn tmux_detection_conservatively_falls_back_to_blocks() {
 }
 
 #[test]
-fn iterm2_is_detected_but_not_a_supported_renderer() {
+fn iterm2_detection_uses_kitty_graphics() {
     assert_detection_fixture(
         "iterm2.env",
         include_bytes!("../../../tests/fixtures/terminal/golden/iterm2-detection.golden"),
     );
-    let frame = Frame::solid(1, 1, Rgb8::BLACK).unwrap();
-    let geometry = TerminalGeometry::new(1, 1, 1, 1).unwrap();
-    assert!(render_frame(&frame, geometry, GraphicsProtocol::ITerm2).is_err());
-    let fallback = render_frame_with_fallback(&frame, geometry, GraphicsProtocol::ITerm2).unwrap();
-    assert_eq!(fallback.protocol, GraphicsProtocol::HalfBlock);
+    let capabilities = detect_capabilities(&environment_fixture("iterm2.env"));
+    assert_eq!(capabilities.protocol, GraphicsProtocol::Kitty);
+    assert!(capabilities.renderer_is_supported());
 }
 
 #[test]

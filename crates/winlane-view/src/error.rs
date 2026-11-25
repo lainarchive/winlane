@@ -17,6 +17,10 @@ pub enum ViewError {
     FrameTooLarge { pixels: usize, maximum: usize },
     #[error("terminal geometry dimensions must be nonzero")]
     InvalidGeometry,
+    #[error("zoom must be 100..=400 percent, got {zoom_percent}")]
+    InvalidZoom { zoom_percent: u16 },
+    #[error("crop rectangle is outside the frame")]
+    CropOutOfBounds,
     #[error("{protocol} was detected but its renderer is not implemented")]
     UnsupportedProtocol { protocol: &'static str },
     #[error("invalid frame artifact: {0}")]
@@ -32,6 +36,8 @@ pub enum ViewError {
     },
     #[error("frame artifact sha256 does not match metadata")]
     FrameArtifactHashMismatch,
+    #[error("PNG encoding failed: {0}")]
+    ImageEncode(#[from] png::EncodingError),
     #[error("terminal output failed")]
     Output(#[from] io::Error),
 }

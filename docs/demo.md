@@ -57,7 +57,7 @@ The cast is recorded with asciinema `--idle-time-limit 2`; long idle waits are c
 
 ## Caveats
 
-- Because the view runs inside tmux, the conservative half-block renderer is used even when the outer terminal supports kitty graphics.
+- Because the view runs inside tmux, the conservative half-block preview renderer is used even when the outer terminal supports Kitty graphics. Released tmux does not reliably manage Kitty placements per pane; pane-aware support exists only in unreleased tmux master/next-3.9 work. The fallback reserves one row for a `HALF-BLOCK PREVIEW` label when space permits.
 - The golden image must already provision Windows, virtio drivers, QEMU Guest Agent, and the interactive user session used by winlane.
 - Notepad and the post-restore text reader run through temporary Scheduled Tasks using the `INTERACTIVE` principal. If no interactive session exists, the demo correctly fails.
 - UI Automation paths are read fresh immediately before each write and before the post-restore text read. Runtime-id checks are used for semantic writes; the independent post-restore reader verifies the freshly resolved text node content exactly.
