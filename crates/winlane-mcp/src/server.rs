@@ -183,6 +183,7 @@ fn tool_uses_machine(tool: &str) -> bool {
             | "key"
             | "scroll"
             | "checkpoint_create"
+            | "checkpoint_list"
             | "checkpoint_delete"
             | "ui_tree"
             | "ui_invoke"

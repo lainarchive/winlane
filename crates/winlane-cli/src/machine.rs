@@ -137,6 +137,15 @@ async fn resolve_machine_command(command: &MachineCommand) -> CliResult<MachineC
             args.machine_name = None;
             Ok(MachineCommand::CheckpointDelete(args))
         }
+        MachineCommand::CheckpointRestore(args) if args.checkpoint_file.is_none() => {
+            let machine =
+                resolve_machine(&args.control_socket, &args.machine_json, &args.machine_name)
+                    .await?;
+            let mut args = args.clone();
+            args.machine_json = Some(serde_json::to_string(&machine)?);
+            args.machine_name = None;
+            Ok(MachineCommand::CheckpointRestore(args))
+        }
         MachineCommand::Create(_)
         | MachineCommand::List(_)
         | MachineCommand::CheckpointRestore(_) => Ok(command.clone()),
@@ -333,8 +342,74 @@ fn checkpoint_label(args: &CheckpointCreateArgs) -> CliResult<String> {
 }
 
 fn checkpoint_ref(args: &CheckpointRestoreArgs) -> CliResult<CheckpointRef> {
-    let bytes = std::fs::read(&args.checkpoint_file)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    if let Some(checkpoint_file) = &args.checkpoint_file {
+        let bytes = std::fs::read(checkpoint_file)?;
+        return Ok(serde_json::from_slice(&bytes)?);
+    }
+    checkpoint_ref_by_id(args)
+}
+
+fn checkpoint_ref_by_id(args: &CheckpointRestoreArgs) -> CliResult<CheckpointRef> {
+    let checkpoint_id = args
+        .checkpoint_id
+        .as_deref()
+        .ok_or_else(|| crate::CliError::Usage("checkpoint id missing after parsing".to_string()))?;
+    validate_restore_checkpoint_id(checkpoint_id)?;
+    let machine_json = args.machine_json.as_deref().ok_or_else(|| {
+        crate::CliError::Usage("machine JSON missing after resolution".to_string())
+    })?;
+    let machine: MachineHandle = serde_json::from_str(machine_json)?;
+    let checkpoint_dir = PathBuf::from(&machine.state_dir)
+        .join("checkpoints")
+        .join(checkpoint_id);
+    let metadata_path = checkpoint_dir.join("checkpoint.json");
+    for (path, directory) in [(&checkpoint_dir, true), (&metadata_path, false)] {
+        let metadata = std::fs::symlink_metadata(path)?;
+        let valid = if directory {
+            metadata.file_type().is_dir()
+        } else {
+            metadata.file_type().is_file()
+        };
+        if !valid {
+            return Err(crate::CliError::Operation(format!(
+                "checkpoint path is not a regular {}: {}",
+                if directory { "directory" } else { "file" },
+                path.display()
+            )));
+        }
+    }
+    let bytes = std::fs::read(&metadata_path)?;
+    let metadata: Value = serde_json::from_slice(&bytes)?;
+    let checkpoint_value = metadata.get("checkpoint").cloned().ok_or_else(|| {
+        crate::CliError::Operation(format!(
+            "checkpoint metadata does not contain a checkpoint object: {}",
+            metadata_path.display()
+        ))
+    })?;
+    let checkpoint: CheckpointRef = serde_json::from_value(checkpoint_value)?;
+    if checkpoint.id != checkpoint_id
+        || checkpoint.machine_id != machine.id
+        || checkpoint.state_dir != machine.state_dir
+    {
+        return Err(crate::CliError::Operation(
+            "checkpoint metadata does not match the selected machine".to_string(),
+        ));
+    }
+    Ok(checkpoint)
+}
+
+fn validate_restore_checkpoint_id(checkpoint_id: &str) -> CliResult<()> {
+    if checkpoint_id.is_empty()
+        || checkpoint_id.len() > 128
+        || !checkpoint_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err(crate::CliError::Usage(
+            "checkpoint id must be 1-128 ASCII letters, digits, '-' or '_'".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn clone_machine_handle(args: &CloneArgs) -> CliResult<MachineHandle> {
@@ -591,13 +666,68 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
         let args = CheckpointRestoreArgs {
             control_socket: PathBuf::from("/tmp/control.sock"),
-            checkpoint_file: path,
+            checkpoint_file: Some(path),
+            machine_json: None,
+            machine_name: None,
+            checkpoint_id: None,
         };
         let (_socket, request) = machine_request(&MachineCommand::CheckpointRestore(args)).unwrap();
         let encoded = serde_json::to_value(request).unwrap();
         assert_eq!(encoded["op"], "restore");
         assert_eq!(encoded["checkpoint"]["id"], "checkpoint-1");
         assert_eq!(encoded["checkpoint"]["machine_id"], "machine-1");
+    }
+
+    #[test]
+    fn checkpoint_restore_by_id_reads_machine_checkpoint_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let state_dir = directory.path().join("builder");
+        let checkpoint_dir = state_dir.join("checkpoints").join("checkpoint-1");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        let machine = MachineHandle {
+            id: "machine-1".to_string(),
+            name: "builder".to_string(),
+            state_dir: state_dir.to_string_lossy().into_owned(),
+            backend: "qemu".to_string(),
+            state: MachineState::Stopped,
+        };
+        let checkpoint = CheckpointRef {
+            id: "checkpoint-1".to_string(),
+            machine_id: machine.id.clone(),
+            created_unix_ms: 42,
+            state_dir: machine.state_dir.clone(),
+            sha256: Some("abc".to_string()),
+        };
+        std::fs::write(
+            checkpoint_dir.join("checkpoint.json"),
+            serde_json::to_vec(&json!({ "checkpoint": checkpoint })).unwrap(),
+        )
+        .unwrap();
+        let args = CheckpointRestoreArgs {
+            control_socket: PathBuf::from("/tmp/control.sock"),
+            checkpoint_file: None,
+            machine_json: Some(serde_json::to_string(&machine).unwrap()),
+            machine_name: None,
+            checkpoint_id: Some("checkpoint-1".to_string()),
+        };
+        let (_socket, request) = machine_request(&MachineCommand::CheckpointRestore(args)).unwrap();
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["op"], "restore");
+        assert_eq!(encoded["checkpoint"]["id"], "checkpoint-1");
+        assert_eq!(encoded["checkpoint"]["machine_id"], "machine-1");
+    }
+
+    #[test]
+    fn checkpoint_restore_by_id_rejects_traversal_before_ipc() {
+        let machine = machine_args();
+        let args = CheckpointRestoreArgs {
+            control_socket: machine.control_socket,
+            checkpoint_file: None,
+            machine_json: machine.machine_json,
+            machine_name: None,
+            checkpoint_id: Some("../checkpoint-1".to_string()),
+        };
+        assert!(machine_request(&MachineCommand::CheckpointRestore(args)).is_err());
     }
 
     #[test]

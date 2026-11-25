@@ -90,6 +90,7 @@ impl McpControlPlane {
             "key" => self.key(input).await,
             "scroll" => self.scroll(input).await,
             "checkpoint_create" => self.checkpoint_create(input).await,
+            "checkpoint_list" => self.checkpoint_list(input).await,
             "checkpoint_delete" => self.checkpoint_delete(input).await,
             "checkpoint_restore" => self.checkpoint_restore(input).await,
             "ui_tree" => self.ui_tree(input).await,
@@ -336,6 +337,14 @@ impl McpControlPlane {
                 machine,
                 label: required_string(input, "label")?,
             })
+            .await?)
+    }
+
+    pub async fn checkpoint_list(&self, input: &Value) -> McpResult<Value> {
+        let machine = self.machine_input(input).await?;
+        Ok(self
+            .client
+            .invoke(&ControlRequest::CheckpointList { machine })
             .await?)
     }
 
@@ -694,6 +703,11 @@ pub fn tool_definitions() -> Value {
             "properties": {"machine": machine_ref, "label": {"type": "string"}},
             "required": ["machine", "label"]
         }},
+        {"name": "checkpoint_list", "description": "List checkpoints for a machine", "inputSchema": {
+            "type": "object",
+            "properties": {"machine": machine_ref},
+            "required": ["machine"]
+        }},
         {"name": "checkpoint_delete", "description": "Delete one checkpoint from a stopped machine", "inputSchema": {
             "type": "object",
             "properties": {
@@ -980,6 +994,7 @@ mod tests {
                 "key",
                 "scroll",
                 "checkpoint_create",
+                "checkpoint_list",
                 "checkpoint_delete",
                 "checkpoint_restore",
                 "ui_tree",

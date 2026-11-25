@@ -5,7 +5,7 @@ use winlane_cli::{
     DaemonStopArgs, GuestCommand, MachineArgs, MachineCommand, run_daemon_stop, run_guest_command,
     run_machine_command,
 };
-use winlane_contracts::{MachineHandle, MachineState};
+use winlane_contracts::{CheckpointRef, MachineHandle, MachineState};
 use winlane_ipc::{ControlRequest, ControlResponse};
 
 fn machine() -> MachineHandle {
@@ -322,6 +322,83 @@ async fn checkpoint_list_invokes_exact_ipc_operation_and_prints_compact_array() 
     assert!(!output[..output.len() - 1].contains(&b'\n'));
     let output_json: serde_json::Value = serde_json::from_slice(&output).expect("decode output");
     assert_eq!(output_json, catalog);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn checkpoint_restore_by_name_and_id_resolves_and_invokes_exact_ipc_operation() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let state_dir = root.path().join("builder");
+    let checkpoint_dir = state_dir.join("checkpoints").join("checkpoint-1");
+    std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint directory");
+    let machine = MachineHandle {
+        id: "machine-1".to_string(),
+        name: "builder".to_string(),
+        state_dir: state_dir.to_string_lossy().into_owned(),
+        backend: "qemu".to_string(),
+        state: MachineState::Stopped,
+    };
+    let checkpoint = CheckpointRef {
+        id: "checkpoint-1".to_string(),
+        machine_id: machine.id.clone(),
+        created_unix_ms: 42,
+        state_dir: machine.state_dir.clone(),
+        sha256: Some("abc".to_string()),
+    };
+    std::fs::write(
+        checkpoint_dir.join("checkpoint.json"),
+        serde_json::to_vec(&serde_json::json!({ "checkpoint": checkpoint }))
+            .expect("encode metadata"),
+    )
+    .expect("write checkpoint metadata");
+
+    let socket_path = root.path().join("control.sock");
+    let server_socket = socket_path.clone();
+    let server_machine = machine.clone();
+    let server_checkpoint = checkpoint.clone();
+    let server = tokio::spawn(async move {
+        let listener = UnixListener::bind(server_socket).expect("bind control socket");
+        let (stream, _) = listener.accept().await.expect("accept list client");
+        let request = write_control_response(
+            stream,
+            serde_json::to_value(vec![server_machine.clone()]).expect("encode machines"),
+        )
+        .await;
+        assert_eq!(request, ControlRequest::List);
+
+        let (stream, _) = listener.accept().await.expect("accept restore client");
+        let request = write_control_response(
+            stream,
+            serde_json::to_value(server_machine.clone()).expect("encode machine"),
+        )
+        .await;
+        assert_eq!(
+            request,
+            ControlRequest::Restore {
+                checkpoint: server_checkpoint
+            }
+        );
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let args = winlane_cli::args::CheckpointRestoreArgs {
+        control_socket: socket_path,
+        checkpoint_file: None,
+        machine_json: None,
+        machine_name: Some("builder".to_string()),
+        checkpoint_id: Some("checkpoint-1".to_string()),
+    };
+    let mut output = Vec::new();
+    run_machine_command(&MachineCommand::CheckpointRestore(args), &mut output)
+        .await
+        .expect("run checkpoint restore");
+    server.await.expect("server task");
+    let output_json: serde_json::Value = serde_json::from_slice(&output).expect("decode output");
+    assert_eq!(output_json["id"], "machine-1");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

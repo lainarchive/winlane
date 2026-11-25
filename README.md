@@ -187,12 +187,17 @@ cargo run --release -p winlane-cli -- machine checkpoint delete \
   --checkpoint-id CHECKPOINT_ID
 ```
 
-The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
+The checkpoint file is an opaque, machine-local reference to checkpoint state already managed by the daemon; it is not a portable copy of the disk or memory contents. Restore can use that saved file or select a checkpoint by machine and id. The current backend requires the machine to be stopped before restore. Stopped-checkpoint disk state is applied during restore; running-checkpoint memory/device state is loaded when the machine starts again. Restore prints the machine handle:
 
 ```sh
 cargo run --release -p winlane-cli -- machine stop \
   --control-socket /tmp/winlane-control.sock \
   --machine demo-1
+
+cargo run --release -p winlane-cli -- machine checkpoint restore \
+  --control-socket /tmp/winlane-control.sock \
+  --machine demo-1 \
+  --checkpoint-id CHECKPOINT_ID
 
 cargo run --release -p winlane-cli -- machine checkpoint restore \
   --control-socket /tmp/winlane-control.sock \

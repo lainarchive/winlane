@@ -100,6 +100,22 @@ async fn mcp_tools_map_to_serialized_control_plane() {
         .await
         .expect("checkpoint create");
     assert!(checkpoint["sha256"].is_string());
+    let checkpoints = mcp
+        .dispatch("checkpoint_list", &json!({"machine": "mcptest"}))
+        .await
+        .expect("checkpoint list");
+    assert!(
+        checkpoints
+            .as_array()
+            .expect("checkpoint list array")
+            .iter()
+            .any(|entry| {
+                entry["id"] == checkpoint["id"]
+                    && entry["kind"] == "running"
+                    && entry["registered"] == true
+            }),
+        "{checkpoints}"
+    );
     let running_delete_error = mcp
         .dispatch(
             "checkpoint_delete",
@@ -116,6 +132,18 @@ async fn mcp_tools_map_to_serialized_control_plane() {
     mcp.dispatch("machine_stop", &json!({"machine": machine_json}))
         .await
         .expect("machine stop");
+    let stopped_checkpoints = mcp
+        .dispatch("checkpoint_list", &json!({"machine": machine_json}))
+        .await
+        .expect("stopped checkpoint list");
+    assert!(
+        stopped_checkpoints
+            .as_array()
+            .expect("checkpoint list array")
+            .iter()
+            .any(|entry| entry["id"] == checkpoint["id"] && entry["restorable"] == true),
+        "{stopped_checkpoints}"
+    );
     let deleted = mcp
         .dispatch(
             "checkpoint_delete",

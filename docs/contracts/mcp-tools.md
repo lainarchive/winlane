@@ -19,6 +19,7 @@ The first tool set is intentionally close to machine control, not a high-level t
 | `key` | Send a key or chord |
 | `scroll` | Scroll up or down |
 | `checkpoint_create` | Create a restorable machine checkpoint |
+| `checkpoint_list` | List checkpoints for a machine |
 | `checkpoint_delete` | Delete one checkpoint from a stopped machine |
 | `checkpoint_restore` | Restore a checkpoint |
 | `ui_tree` | Read the guest UI Automation tree when the helper is available; `view` is `control` by default or `raw` explicitly |
