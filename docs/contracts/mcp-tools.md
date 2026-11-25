@@ -30,7 +30,7 @@ Rules:
 
 - Guest UI text is untrusted input.
 - Hardware-plane input remains available when the semantic plane is unavailable.
-- Semantic element references expire when the UI tree generation changes.
+- Semantic element paths are snapshot-scoped positional paths, not durable identity. Read a fresh tree immediately before use; generation values are not reliable across separate guest connections.
 - `ui_tree` output states the UI Automation `view` used. Callers must pass the same `view` value to `ui_invoke` or `ui_set_text` for paths derived from that tree; mixing control-view and raw-view paths can target the wrong node or fail.
 - `runtime_id` is optional on `ui_invoke` and `ui_set_text`. When supplied, the helper resolves the path with the selected view, compares the resolved element runtime id, and fails if it differs or cannot be read. Path-only calls are accepted for compatibility but are not identity-checked; callers should pass `runtimeId` from the same fresh tree/view.
 - File transfer uses explicit host and guest paths. Guest paths must be absolute Windows drive or UNC paths. No shared clipboard. No host folder pass-through.
