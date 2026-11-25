@@ -191,7 +191,7 @@ The hardware-plane MCP tools cover machine creation, cloning, destruction, lifec
 
 Semantic guest MCP tools are implemented for UI tree, invoke, set-text, process execution, and file transfer. They appear in `tools/list`, but the MCP path has not yet been validated against a live Windows guest; use the guest CLI for the validated path until that proof lands.
 
-Export or inspect evidence events:
+Export or inspect evidence events. Export currently copies `events.jsonl`; content-addressed blobs remain under the evidence directory and are not bundled yet:
 
 ```sh
 cargo run -p winlane-cli -- evidence export \
@@ -211,7 +211,7 @@ cargo run -p winlane-cli -- machine stop \
   --machine-json "$machine"
 ```
 
-The daemon does not yet have a shutdown operation. If it is externally terminated, its Unix control socket file can remain behind even though machine sockets and QEMU processes are cleaned up.
+The daemon does not yet have a shutdown RPC. SIGINT and SIGTERM remove the Unix control socket; SIGKILL can leave a stale socket file, which the next daemon startup replaces when no active listener is present.
 
 ## Architecture
 
