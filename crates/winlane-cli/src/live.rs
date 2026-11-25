@@ -178,6 +178,7 @@ struct DisplayedFrame {
     frame_height: u32,
     crop: winlane_view::SourceRect,
     sha256: String,
+    cropped_pixels: Option<Vec<winlane_view::Rgb8>>,
 }
 
 fn terminal_geometry(
@@ -279,22 +280,41 @@ pub async fn run_live_view(config: LiveViewConfig) -> CliResult<()> {
                     cropped_frame = frame.crop(crop)?;
                     &cropped_frame
                 };
-                let output = render_frame_with_fallback(
-                    visible_frame,
-                    session.viewport.geometry(),
-                    protocol,
-                )?;
-                validation.await??;
-                output.write_to(&mut session.stdout)?;
-                session.write_fallback_label()?;
-                session.viewport.repaint_completed();
-                last_frame = Some(DisplayedFrame {
-                    plan: output.plan,
-                    frame_width: captured.width(),
-                    frame_height: captured.height(),
+                let cropped_pixels_unchanged = cropped_output_unchanged(
+                    last_frame.as_ref(),
                     crop,
-                    sha256: captured.sha256().to_string(),
-                });
+                    visible_frame,
+                    session.viewport.full_repaint_required(),
+                );
+                validation.await??;
+                if cropped_pixels_unchanged {
+                    if let Some(displayed) = last_frame.as_mut() {
+                        displayed.sha256 = captured.sha256().to_string();
+                    }
+                } else {
+                    let output = render_frame_with_fallback(
+                        visible_frame,
+                        session.viewport.geometry(),
+                        protocol,
+                    )?;
+                    output.write_to(&mut session.stdout)?;
+                    session.write_fallback_label()?;
+                    session.viewport.repaint_completed();
+                    let cropped_pixels =
+                        if cropped_frame_is_used(crop, frame.width(), frame.height()) {
+                            Some(visible_frame.pixels().to_vec())
+                        } else {
+                            None
+                        };
+                    last_frame = Some(DisplayedFrame {
+                        plan: output.plan,
+                        frame_width: captured.width(),
+                        frame_height: captured.height(),
+                        crop,
+                        sha256: captured.sha256().to_string(),
+                        cropped_pixels,
+                    });
+                }
             } else {
                 validation.await??;
             }
@@ -463,6 +483,27 @@ impl LiveSession {
         }
         Ok(())
     }
+}
+
+fn cropped_output_unchanged(
+    displayed: Option<&DisplayedFrame>,
+    crop: winlane_view::SourceRect,
+    visible_frame: &Frame,
+    viewport_repaint_required: bool,
+) -> bool {
+    !viewport_repaint_required
+        && displayed.is_some_and(|displayed| {
+            displayed.crop == crop
+                && displayed.cropped_pixels.as_deref() == Some(visible_frame.pixels())
+        })
+}
+
+fn cropped_frame_is_used(
+    crop: winlane_view::SourceRect,
+    frame_width: u32,
+    frame_height: u32,
+) -> bool {
+    crop.x != 0 || crop.y != 0 || crop.width != frame_width || crop.height != frame_height
 }
 
 fn frame_repaint_required(
@@ -835,6 +876,7 @@ mod tests {
             frame_height: 4,
             crop,
             sha256: "same".to_string(),
+            cropped_pixels: None,
         };
         assert!(!frame_repaint_required(
             Some(&displayed),
@@ -851,6 +893,50 @@ mod tests {
         ));
         assert!(frame_repaint_required(Some(&displayed), "same", crop, true));
         assert!(frame_repaint_required(None, "same", crop, false));
+    }
+
+    #[test]
+    fn cropped_output_skip_requires_same_exact_pixels_and_stable_viewport() {
+        let crop = winlane_view::SourceRect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
+        let frame = Frame::solid(2, 2, winlane_view::Rgb8::new(1, 2, 3)).unwrap();
+        let displayed = DisplayedFrame {
+            plan: winlane_view::plan_render(
+                2,
+                2,
+                TerminalGeometry::cells(2, 1).unwrap(),
+                winlane_view::OutputSurface::HalfBlockCells,
+            )
+            .unwrap(),
+            frame_width: 4,
+            frame_height: 4,
+            crop,
+            sha256: "old".to_string(),
+            cropped_pixels: Some(frame.pixels().to_vec()),
+        };
+        assert!(cropped_output_unchanged(
+            Some(&displayed),
+            crop,
+            &frame,
+            false
+        ));
+        assert!(!cropped_output_unchanged(
+            Some(&displayed),
+            crop,
+            &frame,
+            true
+        ));
+        let changed = Frame::solid(2, 2, winlane_view::Rgb8::new(1, 2, 4)).unwrap();
+        assert!(!cropped_output_unchanged(
+            Some(&displayed),
+            crop,
+            &changed,
+            false
+        ));
     }
 
     #[test]
