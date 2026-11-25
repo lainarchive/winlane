@@ -6,31 +6,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "max_depth": {
@@ -66,31 +76,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "node": {
@@ -119,31 +139,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "node": {
@@ -177,31 +207,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "command": {
@@ -234,31 +274,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "host_path": {
@@ -282,31 +332,41 @@
       "type": "object",
       "properties": {
         "machine": {
-          "type": "object",
-          "description": "MachineHandle returned by machine creation or restore",
-          "properties": {
-            "id": {
-              "type": "string"
+          "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state_dir": {
+                  "type": "string"
+                },
+                "backend": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "state_dir",
+                "backend",
+                "state"
+              ]
             },
-            "name": {
-              "type": "string"
-            },
-            "state_dir": {
-              "type": "string"
-            },
-            "backend": {
-              "type": "string"
-            },
-            "state": {
-              "type": "string"
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Exact machine name known to the control daemon"
             }
-          },
-          "required": [
-            "id",
-            "name",
-            "state_dir",
-            "backend",
-            "state"
           ]
         },
         "guest_path": {

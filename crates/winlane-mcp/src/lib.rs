@@ -60,11 +60,26 @@ impl McpControlPlane {
             "machine_create" => self.machine_create(input).await,
             "machine_list" => self.machine_list().await,
             "machine_clone" => self.machine_clone(input).await,
-            "machine_destroy" => self.machine_destroy(machine_input(input)?).await,
-            "machine_status" => self.machine_status(machine_input(input)?).await,
-            "machine_start" => self.machine_start(machine_input(input)?).await,
-            "machine_stop" => self.machine_stop(machine_input(input)?).await,
-            "screenshot" => self.screenshot(machine_input(input)?).await,
+            "machine_destroy" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_destroy(machine).await
+            }
+            "machine_status" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_status(machine).await
+            }
+            "machine_start" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_start(machine).await
+            }
+            "machine_stop" => {
+                let machine = self.machine_input(input).await?;
+                self.machine_stop(machine).await
+            }
+            "screenshot" => {
+                let machine = self.machine_input(input).await?;
+                self.screenshot(machine).await
+            }
             "click" => self.click(input).await,
             "move" => self.move_pointer(input).await,
             "type_text" => self.type_text(input).await,
@@ -123,11 +138,29 @@ impl McpControlPlane {
         Ok(self.client.invoke(&ControlRequest::List).await?)
     }
 
+    async fn machine_input(&self, input: &Value) -> McpResult<MachineHandle> {
+        let machine = input.get("machine").ok_or_else(|| {
+            McpError::InvalidInput("missing required field 'machine'".to_string())
+        })?;
+        if let Some(name) = machine.as_str() {
+            if name.is_empty() {
+                return Err(McpError::InvalidInput(
+                    "machine name must not be empty".to_string(),
+                ));
+            }
+            let result = self.client.invoke(&ControlRequest::List).await?;
+            let machines: Vec<MachineHandle> = serde_json::from_value(result)?;
+            return select_machine_by_name(machines, name);
+        }
+        serde_json::from_value(machine.clone()).map_err(McpError::from)
+    }
+
     pub async fn machine_clone(&self, input: &Value) -> McpResult<Value> {
+        let machine = self.machine_input(input).await?;
         Ok(self
             .client
             .invoke(&ControlRequest::CloneMachine {
-                machine: machine_input(input)?,
+                machine,
                 name: required_string(input, "name")?,
             })
             .await?)
@@ -169,7 +202,7 @@ impl McpControlPlane {
     }
 
     pub async fn click(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let button = match optional_string(input, "button")?.as_deref() {
             None | Some("left") => MouseButton::Left,
             Some("middle") => MouseButton::Middle,
@@ -193,7 +226,7 @@ impl McpControlPlane {
 
     pub async fn move_pointer(&self, input: &Value) -> McpResult<Value> {
         self.control(
-            machine_input(input)?,
+            self.machine_input(input).await?,
             ControlEvent::Move {
                 x: required_u32(input, "x")?,
                 y: required_u32(input, "y")?,
@@ -204,7 +237,7 @@ impl McpControlPlane {
 
     pub async fn type_text(&self, input: &Value) -> McpResult<Value> {
         self.control(
-            machine_input(input)?,
+            self.machine_input(input).await?,
             ControlEvent::Type {
                 text: required_string(input, "text")?,
             },
@@ -214,7 +247,7 @@ impl McpControlPlane {
 
     pub async fn key(&self, input: &Value) -> McpResult<Value> {
         self.control(
-            machine_input(input)?,
+            self.machine_input(input).await?,
             ControlEvent::Key {
                 chord: required_string(input, "chord")?,
             },
@@ -237,17 +270,18 @@ impl McpControlPlane {
             McpError::InvalidInput("steps must fit in an unsigned 16-bit integer".to_string())
         })?;
         self.control(
-            machine_input(input)?,
+            self.machine_input(input).await?,
             ControlEvent::Scroll { direction, steps },
         )
         .await
     }
 
     pub async fn checkpoint_create(&self, input: &Value) -> McpResult<Value> {
+        let machine = self.machine_input(input).await?;
         Ok(self
             .client
             .invoke(&ControlRequest::Checkpoint {
-                machine: machine_input(input)?,
+                machine,
                 label: required_string(input, "label")?,
             })
             .await?)
@@ -265,7 +299,7 @@ impl McpControlPlane {
     }
 
     pub async fn ui_tree(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let max_depth = optional_bounded_u64(input, "max_depth", 8, 1, 32)? as u16;
         let max_nodes = optional_bounded_u64(input, "max_nodes", 2000, 1, 20_000)? as u32;
         let view = uia_view_input(input)?;
@@ -281,7 +315,7 @@ impl McpControlPlane {
     }
 
     pub async fn ui_invoke(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let node = required_string(input, "node")?;
         let view = uia_view_input(input)?;
         self.semantic(machine, SemanticOperation::Invoke { node, view })
@@ -289,7 +323,7 @@ impl McpControlPlane {
     }
 
     pub async fn ui_set_text(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let node = required_string(input, "node")?;
         let text = required_string(input, "text")?;
         let view = uia_view_input(input)?;
@@ -298,7 +332,7 @@ impl McpControlPlane {
     }
 
     pub async fn process_run(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let command = required_string(input, "command")?;
         let args = optional_string_array(input, "args")?;
         let timeout_ms = optional_bounded_u64(input, "timeout_ms", 30_000, 1, 600_000)?;
@@ -314,7 +348,7 @@ impl McpControlPlane {
     }
 
     pub async fn file_import(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let host_path = PathBuf::from(required_string(input, "host_path")?);
         let guest_path = required_string(input, "guest_path")?;
         self.semantic(
@@ -328,7 +362,7 @@ impl McpControlPlane {
     }
 
     pub async fn file_export(&self, input: &Value) -> McpResult<Value> {
-        let machine = machine_input(input)?;
+        let machine = self.machine_input(input).await?;
         let guest_path = required_string(input, "guest_path")?;
         let host_path = PathBuf::from(required_string(input, "host_path")?);
         self.semantic(
@@ -449,16 +483,26 @@ fn node_ref(path: &str) -> UiNodeRef {
 
 pub fn tool_definitions() -> Value {
     let machine_ref = json!({
-        "type": "object",
-        "description": "MachineHandle returned by machine creation or restore",
-        "properties": {
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "state_dir": {"type": "string"},
-            "backend": {"type": "string"},
-            "state": {"type": "string"}
-        },
-        "required": ["id", "name", "state_dir", "backend", "state"]
+        "description": "Machine reference: a full MachineHandle object or an exact machine name string resolved through machine_list",
+        "oneOf": [
+            {
+                "type": "object",
+                "description": "MachineHandle returned by machine creation, machine_list, or checkpoint restore",
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "state_dir": {"type": "string"},
+                    "backend": {"type": "string"},
+                    "state": {"type": "string"}
+                },
+                "required": ["id", "name", "state_dir", "backend", "state"]
+            },
+            {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact machine name known to the control daemon"
+            }
+        ]
     });
     let machine_only = json!({
         "type": "object",
@@ -616,11 +660,22 @@ fn uia_view_input(input: &Value) -> McpResult<UiaView> {
     }
 }
 
-fn machine_input(input: &Value) -> McpResult<MachineHandle> {
-    let machine = input
-        .get("machine")
-        .ok_or_else(|| McpError::InvalidInput("missing required field 'machine'".to_string()))?;
-    serde_json::from_value(machine.clone()).map_err(McpError::from)
+fn select_machine_by_name(machines: Vec<MachineHandle>, name: &str) -> McpResult<MachineHandle> {
+    let matches = machines
+        .into_iter()
+        .filter(|machine| machine.name == name)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(McpError::InvalidInput(format!(
+            "no machine named '{name}' is known to this daemon"
+        ))),
+        1 => matches.into_iter().next().ok_or_else(|| {
+            McpError::InvalidInput("machine resolution produced no result".to_string())
+        }),
+        count => Err(McpError::InvalidInput(format!(
+            "{count} machines named '{name}' are known to this daemon"
+        ))),
+    }
 }
 
 fn required_string(input: &Value, field: &str) -> McpResult<String> {
@@ -830,6 +885,80 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(json!(actual), expected);
+    }
+
+    #[test]
+    fn machine_reference_schema_is_handle_or_exact_name_for_machine_tools() {
+        let tools = tool_definitions();
+        for tool in tools.as_array().expect("tool definitions are an array") {
+            let name = tool.get("name").and_then(Value::as_str).expect("tool name");
+            let machine = tool.pointer("/inputSchema/properties/machine");
+            if matches!(
+                name,
+                "machine_create" | "machine_list" | "checkpoint_restore"
+            ) {
+                assert!(machine.is_none(), "{name} must not require machine");
+                continue;
+            }
+            let machine = machine.expect("machine tool schema includes machine");
+            let variants = machine
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .expect("machine schema is a union");
+            assert!(
+                variants.iter().any(|variant| {
+                    variant.get("type").and_then(Value::as_str) == Some("object")
+                })
+            );
+            assert!(variants.iter().any(|variant| {
+                variant.get("type").and_then(Value::as_str) == Some("string")
+                    && variant.get("minLength").and_then(Value::as_u64) == Some(1)
+            }));
+        }
+    }
+
+    fn machine_handle(id: &str, name: &str) -> MachineHandle {
+        MachineHandle {
+            id: id.to_string(),
+            name: name.to_string(),
+            state_dir: format!("/tmp/{id}"),
+            backend: "qemu".to_string(),
+            state: winlane_contracts::MachineState::Stopped,
+        }
+    }
+
+    #[test]
+    fn machine_name_selection_requires_exactly_one_match() {
+        let machine = select_machine_by_name(vec![machine_handle("m1", "builder")], "builder")
+            .expect("exact machine name resolves");
+        assert_eq!(machine.id, "m1");
+
+        let missing = select_machine_by_name(vec![machine_handle("m1", "builder")], "missing");
+        assert!(
+            matches!(missing, Err(McpError::InvalidInput(message)) if message.contains("no machine named 'missing'"))
+        );
+
+        let duplicate = select_machine_by_name(
+            vec![
+                machine_handle("m1", "builder"),
+                machine_handle("m2", "builder"),
+            ],
+            "builder",
+        );
+        assert!(
+            matches!(duplicate, Err(McpError::InvalidInput(message)) if message.contains("2 machines named 'builder'"))
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_machine_name_is_invalid_before_control_connect() {
+        let mcp = McpControlPlane::new("/tmp/winlane-test.sock");
+        let result = mcp
+            .dispatch("machine_status", &json!({"machine": ""}))
+            .await;
+        assert!(
+            matches!(result, Err(McpError::InvalidInput(message)) if message.contains("must not be empty"))
+        );
     }
 
     #[tokio::test]

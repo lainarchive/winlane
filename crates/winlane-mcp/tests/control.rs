@@ -55,6 +55,11 @@ async fn mcp_tools_map_to_serialized_control_plane() {
         .await
         .expect("machine status");
     assert_eq!(status, json!("running"));
+    let named_status = mcp
+        .dispatch("machine_status", &json!({"machine": "mcptest"}))
+        .await
+        .expect("machine status by name");
+    assert_eq!(named_status, json!("running"));
     let frame = mcp
         .dispatch("screenshot", &json!({"machine": machine_json}))
         .await
