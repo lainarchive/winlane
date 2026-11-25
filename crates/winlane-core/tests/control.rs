@@ -150,6 +150,81 @@ async fn fake_qmp_machine_lifecycle_frames_input_checkpoints_and_clones() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_fake_machines_run_and_clean_up_independently() {
+    let root = tempfile::tempdir().expect("temporary machine root");
+    let mut backend = QemuBackend::new(root.path())
+        .await
+        .expect("backend")
+        .with_qemu_binaries(fixture("fake_qemu_system.py"), fixture("fake_qemu_img.py"));
+
+    let first = backend
+        .create_machine(&spec("machineone"))
+        .await
+        .expect("create first machine");
+    let second = backend
+        .create_machine(&spec("machinetwo"))
+        .await
+        .expect("create second machine");
+    backend
+        .start_machine(&first)
+        .await
+        .expect("start first machine");
+    backend
+        .start_machine(&second)
+        .await
+        .expect("start second machine");
+
+    assert_eq!(
+        backend.status_machine(&first).await.expect("first status"),
+        MachineState::Running
+    );
+    assert_eq!(
+        backend
+            .status_machine(&second)
+            .await
+            .expect("second status"),
+        MachineState::Running
+    );
+    let first_frame = backend.capture_frame(&first).await.expect("first frame");
+    let second_frame = backend.capture_frame(&second).await.expect("second frame");
+    assert_ne!(first_frame.blob_path, second_frame.blob_path);
+
+    let listed = backend.list_machines().await.expect("list machines");
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|machine| machine.state == MachineState::Running)
+    );
+
+    backend
+        .stop_machine(&first)
+        .await
+        .expect("stop first machine");
+    assert_eq!(
+        backend
+            .status_machine(&second)
+            .await
+            .expect("second status"),
+        MachineState::Running
+    );
+    backend
+        .stop_machine(&second)
+        .await
+        .expect("stop second machine");
+    backend
+        .destroy_machine(&first)
+        .await
+        .expect("destroy first machine");
+    backend
+        .destroy_machine(&second)
+        .await
+        .expect("destroy second machine");
+    assert!(!root.path().join("machineone").exists());
+    assert!(!root.path().join("machinetwo").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn base_image_and_guest_agent_create_overlay_and_qga_socket() {
     let root = tempfile::tempdir().expect("temporary machine root");
     let image_root = tempfile::tempdir().expect("temporary image root");
