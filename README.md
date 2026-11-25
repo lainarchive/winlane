@@ -116,7 +116,7 @@ cargo run --release -p winlane-provision -- provision \
   --json
 ```
 
-The output golden image is written under the artifact root as `win11-alpha/golden.qcow2`. Provisioning writes a machine-readable report next to it. ISOs, disks, screenshots, reports, and machine state are deliberately ignored by git.
+The output golden image is written under the artifact root as `win11-alpha/golden.qcow2`. Provisioning writes a machine-readable report next to it. The generated first-boot script disables hibernation and sets AC/DC standby and monitor power-off timeouts to zero so unattended coding machines do not suspend or blank their console during long-running operations. ISOs, disks, screenshots, reports, and machine state are deliberately ignored by git.
 
 ## Start the control daemon
 

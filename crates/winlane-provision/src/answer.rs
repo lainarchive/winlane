@@ -259,6 +259,10 @@ if defined VIRTIO (
   echo virtio media not found >> %LOG%
 )
 powercfg -h off >> %LOG% 2>&1
+powercfg /change standby-timeout-ac 0 >> %LOG% 2>&1
+powercfg /change standby-timeout-dc 0 >> %LOG% 2>&1
+powercfg /change monitor-timeout-ac 0 >> %LOG% 2>&1
+powercfg /change monitor-timeout-dc 0 >> %LOG% 2>&1
 net accounts /maxpwage:unlimited >> %LOG% 2>&1
 echo %date% %time% ready > C:\winlane-ready.txt
 endlocal
@@ -338,5 +342,15 @@ mod tests {
     fn firstboot_installs_qemu_guest_agent() {
         assert!(firstboot_cmd().contains("qemu-ga-x86_64.msi"));
         assert!(firstboot_cmd().contains("winlane-ready.txt"));
+    }
+
+    #[test]
+    fn firstboot_disables_hibernation_sleep_and_display_poweroff() {
+        let script = firstboot_cmd();
+        assert!(script.contains("powercfg -h off"));
+        assert!(script.contains("powercfg /change standby-timeout-ac 0"));
+        assert!(script.contains("powercfg /change standby-timeout-dc 0"));
+        assert!(script.contains("powercfg /change monitor-timeout-ac 0"));
+        assert!(script.contains("powercfg /change monitor-timeout-dc 0"));
     }
 }
